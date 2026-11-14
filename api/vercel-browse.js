@@ -353,16 +353,37 @@ function sanitizeAndRewriteHtml(
     .replace(/<meta\b[^>]*\/?>/gi, '')
     .replace(/<base\b[^>]*\/?>/gi, '');
 
-  // Strip inline JS event handlers
+  // Extract static navigation/actions from onclick handlers before stripping inline JS
+  content = content.replace(
+    /\s+onclick\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
+    (_m, dq, sq) => {
+      const code = decodeHtmlEntities(dq ?? sq ?? '');
+      const urlMatch = code.match(
+        /(?:window\.)?(?:location(?:\.href)?\s*=\s*|location\.assign\(\s*|window\.open\(\s*)['"]([^'"]+)['"]/i,
+      );
+      if (urlMatch?.[1]) {
+        const abs = resolveAbsUrl(urlMatch[1], baseUrl);
+        if (/^https?:\/\//i.test(abs)) {
+          return ` data-sv-href="${escapeHtml(abs)}"`;
+        }
+      }
+      if (/history\.back\s*\(/i.test(code)) return ' data-sv-action="back"';
+      if (/history\.forward\s*\(/i.test(code)) return ' data-sv-action="forward"';
+      if (/\.submit\s*\(/i.test(code)) return ' data-sv-action="submit"';
+      return '';
+    },
+  );
+
+  // Strip remaining inline JS event handlers
   content = content.replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
   content = content.replace(
-    /\b(href|action)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*'|javascript:[^\s>]+)/gi,
+    /\b(href|action|formaction)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*'|javascript:[^\s>]+)/gi,
     '$1="#"',
   );
 
-  // Rewrite quoted AND unquoted href and action attributes to absolute URLs
+  // Rewrite quoted AND unquoted href, action, formaction, data-href, data-url attributes to absolute URLs
   content = content.replace(
-    /\b(href|action)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi,
+    /\b(href|action|formaction|data-href|data-url)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi,
     (_m, attr, dq, sq, uq) => {
       const val = dq ?? sq ?? uq ?? '';
       const abs = resolveAbsUrl(val, baseUrl);

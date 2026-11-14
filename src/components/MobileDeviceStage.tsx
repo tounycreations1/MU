@@ -83,6 +83,14 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   const wheelRafRef = useRef<number | null>(null);
 
   const isVercelMode = engineMode === 'vercel-proxy';
+  const onNavigateRef = useRef(onNavigate);
+  onNavigateRef.current = onNavigate;
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
+  const onForwardRef = useRef(onForward);
+  onForwardRef.current = onForward;
+  const inspectModeRef = useRef(state.inspectMode);
+  inspectModeRef.current = state.inspectMode;
 
   const queueWheel = (x: number, y: number, dx: number, dy: number) => {
     if (pendingWheelRef.current) {
@@ -182,7 +190,14 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       .sv-body { min-height: 100%; width: 100%; max-width: 100%; margin: 0; overflow-wrap: anywhere; overflow-x: hidden; overflow-y: visible !important; height: auto !important; }
       .sv-body img, .sv-body video { max-width: 100%; height: auto; }
       .sv-body svg { max-width: 100%; }
-      .sv-body a { cursor: pointer; }
+      .sv-body a, .sv-body button, .sv-body [role="button"], .sv-body input[type="submit"], .sv-body input[type="button"], .sv-body summary {
+        cursor: pointer !important;
+        pointer-events: auto !important;
+      }
+      [aria-hidden="true"].fixed, .modal-backdrop:not(.show), [hidden] {
+        display: none !important;
+        pointer-events: none !important;
+      }
       .content-collapsible-block { display: block !important; }
       ::-webkit-scrollbar { width: 5px; height: 5px; }
       ::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.4); border-radius: 3px; }
@@ -196,43 +211,279 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
     shadow.innerHTML = `${styleTags}\n${renderedPage.htmlBody}`;
     shadow.host.scrollTop = 0;
 
+    const submitFormElement = (form: HTMLFormElement, submitter?: HTMLElement | null) => {
+      const formActionAttr = submitter?.getAttribute('formaction') || form.getAttribute('action') || renderedPage.url;
+      let actionUrl = renderedPage.url;
+      try {
+        actionUrl = new URL(formActionAttr, renderedPage.url).toString();
+      } catch {
+        actionUrl = renderedPage.url;
+      }
+
+      const method = (submitter?.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase();
+      const fd = new FormData(form);
+      const submitName = submitter?.getAttribute('name');
+      const submitVal = submitter?.getAttribute('value') ?? '';
+      if (submitName && !fd.has(submitName)) {
+        fd.append(submitName, submitVal);
+      }
+
+      const params = new URLSearchParams();
+      fd.forEach((val, key) => {
+        if (typeof val === 'string') params.append(key, val);
+      });
+
+      if (method === 'POST') {
+        onNavigateRef.current(actionUrl, { method: 'POST', formData: params.toString() });
+      } else {
+        const parsed = new URL(actionUrl);
+        params.forEach((v, k) => parsed.searchParams.set(k, v));
+        onNavigateRef.current(parsed.toString());
+      }
+    };
+
+    const toggleTargetVisibility = (target: HTMLElement, forceShow?: boolean) => {
+      const isHidden =
+        target.hasAttribute('hidden') ||
+        target.classList.contains('hidden') ||
+        window.getComputedStyle(target).display === 'none';
+      const show = forceShow !== undefined ? forceShow : isHidden;
+      if (show) {
+        target.removeAttribute('hidden');
+        target.classList.remove('hidden');
+        if (window.getComputedStyle(target).display === 'none') {
+          target.style.display = 'block';
+        }
+      } else {
+        target.setAttribute('hidden', '');
+        target.classList.add('hidden');
+        target.style.display = 'none';
+      }
+    };
+
     const handleClick = (event: Event) => {
       const mouseEvent = event as MouseEvent;
-      if (state.inspectMode) return;
+      if (inspectModeRef.current) return;
 
       const path = mouseEvent.composedPath();
-      const anchor = path.find(
-        (node): node is HTMLAnchorElement =>
-          node instanceof HTMLElement && node.tagName === 'A',
+      const interactiveEl = path.find(
+        (node): node is HTMLElement =>
+          node instanceof HTMLElement &&
+          (node.tagName === 'A' ||
+            node.tagName === 'BUTTON' ||
+            (node.tagName === 'INPUT' &&
+              ['submit', 'button', 'image', 'reset'].includes(
+                (node as HTMLInputElement).type.toLowerCase(),
+              )) ||
+            node.getAttribute('role') === 'button' ||
+            node.getAttribute('role') === 'tab' ||
+            node.hasAttribute('data-sv-href') ||
+            node.hasAttribute('data-href') ||
+            node.hasAttribute('data-url')),
       );
-      if (!anchor) return;
 
-      const rawHref = (anchor.getAttribute('href') || '').trim();
-      if (!rawHref) return;
+      if (!interactiveEl) return;
 
-      if (rawHref.startsWith('#')) {
-        mouseEvent.preventDefault();
-        const targetId = rawHref.slice(1);
-        if (targetId) {
-          const target = shadow.getElementById(targetId);
-          target?.scrollIntoView({ behavior: 'smooth' });
+      // 1. Standard Anchor navigation
+      if (interactiveEl.tagName === 'A') {
+        const rawHref = (interactiveEl.getAttribute('href') || '').trim();
+        if (rawHref) {
+          if (rawHref.startsWith('#')) {
+            mouseEvent.preventDefault();
+            const targetId = rawHref.slice(1);
+            if (targetId) {
+              const target = shadow.getElementById(targetId);
+              if (target) target.scrollIntoView({ behavior: 'smooth' });
+            }
+            return;
+          }
+          if (/^(mailto:|tel:|javascript:)/i.test(rawHref)) {
+            mouseEvent.preventDefault();
+            return;
+          }
+          try {
+            const resolved = new URL(rawHref, renderedPage.url).toString();
+            if (/^https?:\/\//i.test(resolved)) {
+              mouseEvent.preventDefault();
+              onNavigateRef.current(resolved);
+              return;
+            }
+          } catch {
+            // ignore
+          }
         }
-        return;
       }
 
-      if (/^(mailto:|tel:|javascript:)/i.test(rawHref)) {
+      // 2. Extracted onclick URL or data-href/data-url/formaction navigation
+      const navHref =
+        interactiveEl.getAttribute('data-sv-href') ||
+        interactiveEl.getAttribute('data-href') ||
+        interactiveEl.getAttribute('data-url') ||
+        interactiveEl.getAttribute('formaction');
+      if (navHref && !navHref.startsWith('#')) {
+        try {
+          const resolved = new URL(navHref, renderedPage.url).toString();
+          if (/^https?:\/\//i.test(resolved)) {
+            mouseEvent.preventDefault();
+            onNavigateRef.current(resolved);
+            return;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      // 3. History back / forward buttons
+      const svAction = interactiveEl.getAttribute('data-sv-action');
+      if (svAction === 'back') {
         mouseEvent.preventDefault();
+        onBackRef.current();
+        return;
+      }
+      if (svAction === 'forward') {
+        mouseEvent.preventDefault();
+        onForwardRef.current();
         return;
       }
 
-      try {
-        const resolved = new URL(rawHref, renderedPage.url).toString();
-        if (/^https?:\/\//i.test(resolved)) {
+      // 4. Copy-to-clipboard buttons (e.g. IP copy button)
+      const copyVal =
+        interactiveEl.getAttribute('data-copy-value') ||
+        interactiveEl.getAttribute('data-clipboard-text');
+      if (copyVal) {
+        mouseEvent.preventDefault();
+        navigator.clipboard?.writeText(copyVal).catch(() => {});
+        const prevText = interactiveEl.textContent;
+        interactiveEl.textContent = 'Copied';
+        window.setTimeout(() => {
+          if (interactiveEl.isConnected && prevText !== null) {
+            interactiveEl.textContent = prevText;
+          }
+        }, 1200);
+        return;
+      }
+
+      // 5. Submit buttons / form-associated buttons
+      const isSubmitBtn =
+        svAction === 'submit' ||
+        (interactiveEl.tagName === 'INPUT' &&
+          ['submit', 'image'].includes((interactiveEl as HTMLInputElement).type.toLowerCase())) ||
+        (interactiveEl.tagName === 'BUTTON' &&
+          (interactiveEl as HTMLButtonElement).type === 'submit');
+
+      const formAttrId = interactiveEl.getAttribute('form');
+      const targetForm =
+        (formAttrId ? (shadow.getElementById(formAttrId) as HTMLFormElement | null) : null) ||
+        (interactiveEl.closest('form') as HTMLFormElement | null);
+
+      if (isSubmitBtn && targetForm) {
+        mouseEvent.preventDefault();
+        submitFormElement(targetForm, interactiveEl);
+        return;
+      }
+
+      // 6. Modal / dialog / cookie banner dismiss buttons
+      const btnText = (interactiveEl.textContent || interactiveEl.getAttribute('aria-label') || '')
+        .trim()
+        .toLowerCase();
+      const hasDismissAttr =
+        interactiveEl.hasAttribute('data-dismiss') ||
+        interactiveEl.hasAttribute('data-bs-dismiss') ||
+        /\b(close|dismiss|accept|reject|decline|got it|agree)\b/i.test(btnText);
+
+      if (hasDismissAttr) {
+        const container = interactiveEl.closest(
+          '[role="dialog"], [aria-modal="true"], .modal, [class*="cookie"], [class*="consent"], [class*="banner"], [data-homepage-report]',
+        ) as HTMLElement | null;
+        if (container) {
           mouseEvent.preventDefault();
-          onNavigate(resolved);
+          container.style.display = 'none';
+          container.setAttribute('hidden', '');
+          return;
         }
-      } catch {
-        // ignore unparseable URL
+      }
+
+      // 7. Tabs ([role="tab"])
+      if (interactiveEl.getAttribute('role') === 'tab') {
+        mouseEvent.preventDefault();
+        const tablist = interactiveEl.closest('[role="tablist"]');
+        if (tablist) {
+          tablist.querySelectorAll('[role="tab"]').forEach((t) => {
+            t.setAttribute('aria-selected', t === interactiveEl ? 'true' : 'false');
+          });
+        }
+        const ctrlId = interactiveEl.getAttribute('aria-controls');
+        if (ctrlId) {
+          const panel = shadow.getElementById(ctrlId);
+          if (panel) {
+            panel.parentElement?.querySelectorAll('[role="tabpanel"]').forEach((p) => {
+              (p as HTMLElement).style.display = p === panel ? 'block' : 'none';
+            });
+          }
+        }
+        return;
+      }
+
+      // 8. Expand / Toggle controls (aria-controls, data-target, data-bs-target, search toggle)
+      if (interactiveEl.hasAttribute('aria-expanded')) {
+        const next = interactiveEl.getAttribute('aria-expanded') !== 'true';
+        interactiveEl.setAttribute('aria-expanded', String(next));
+      }
+      if (interactiveEl.hasAttribute('aria-pressed')) {
+        const next = interactiveEl.getAttribute('aria-pressed') !== 'true';
+        interactiveEl.setAttribute('aria-pressed', String(next));
+      }
+
+      const targetRef =
+        interactiveEl.getAttribute('aria-controls') ||
+        interactiveEl.getAttribute('data-bs-target') ||
+        interactiveEl.getAttribute('data-target');
+      if (targetRef) {
+        const cleanId = targetRef.replace(/^#/, '');
+        const targetEl = shadow.getElementById(cleanId) || shadow.querySelector(targetRef);
+        if (targetEl instanceof HTMLElement) {
+          mouseEvent.preventDefault();
+          toggleTargetVisibility(targetEl);
+          return;
+        }
+      }
+
+      // Search toggle / button near hidden search input
+      if (
+        interactiveEl.hasAttribute('data-search-toggle') ||
+        /search/i.test(interactiveEl.getAttribute('aria-label') || '')
+      ) {
+        const searchInput =
+          (targetForm?.querySelector('input[type="search"], input[type="text"], input:not([type="hidden"])') as HTMLInputElement | null) ||
+          (shadow.querySelector('input[type="search"], header input[type="text"], [role="search"] input') as HTMLInputElement | null);
+        if (searchInput) {
+          mouseEvent.preventDefault();
+          const searchContainer = searchInput.closest('form, [role="search"], .hidden, [hidden]') as HTMLElement | null;
+          if (searchContainer) toggleTargetVisibility(searchContainer, true);
+          searchInput.focus();
+          if (searchInput.value.trim() && searchInput.form) {
+            submitFormElement(searchInput.form, interactiveEl);
+          }
+          return;
+        }
+      }
+
+      // 9. Fallback: if button wraps or sits next to an <a>, follow it
+      const nestedAnchor = interactiveEl.querySelector('a[href]') as HTMLAnchorElement | null;
+      if (nestedAnchor) {
+        const href = nestedAnchor.getAttribute('href') || '';
+        if (href && !href.startsWith('#')) {
+          try {
+            const resolved = new URL(href, renderedPage.url).toString();
+            if (/^https?:\/\//i.test(resolved)) {
+              mouseEvent.preventDefault();
+              onNavigateRef.current(resolved);
+              return;
+            }
+          } catch {
+            // ignore
+          }
+        }
       }
     };
 
@@ -241,29 +492,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       submitEvent.preventDefault();
       const form = submitEvent.target as HTMLFormElement | null;
       if (!form) return;
-
-      const rawAction = form.getAttribute('action') || renderedPage.url;
-      let actionUrl = renderedPage.url;
-      try {
-        actionUrl = new URL(rawAction, renderedPage.url).toString();
-      } catch {
-        actionUrl = renderedPage.url;
-      }
-
-      const method = (form.getAttribute('method') || 'GET').toUpperCase();
-      const fd = new FormData(form);
-      const params = new URLSearchParams();
-      fd.forEach((val, key) => {
-        if (typeof val === 'string') params.append(key, val);
-      });
-
-      if (method === 'POST') {
-        onNavigate(actionUrl, { method: 'POST', formData: params.toString() });
-      } else {
-        const parsed = new URL(actionUrl);
-        params.forEach((v, k) => parsed.searchParams.set(k, v));
-        onNavigate(parsed.toString());
-      }
+      submitFormElement(form, submitEvent.submitter as HTMLElement | null);
     };
 
     shadow.addEventListener('click', handleClick);
@@ -272,7 +501,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       shadow.removeEventListener('click', handleClick);
       shadow.removeEventListener('submit', handleSubmit);
     };
-  }, [isVercelMode, onNavigate, renderedPage, state.inspectMode]);
+  }, [isVercelMode, renderedPage]);
 
   // Register live Shadow DOM inspection & style editing bridge
   useEffect(() => {
@@ -356,6 +585,8 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isVercelMode && !state.inspectMode) return;
+
     if (!isVercelMode) {
       screenRef.current?.focus();
     }
@@ -368,8 +599,6 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       onElementPicked();
       return;
     }
-
-    if (isVercelMode) return;
 
     dragRef.current = {
       active: true,
