@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { chromium } from 'playwright-core';
@@ -55,6 +56,12 @@ function findChromiumExecutable(): string | undefined {
   if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
     candidates.push(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH);
   }
+  try {
+    const pwDefault = chromium.executablePath();
+    if (pwDefault) candidates.push(pwDefault);
+  } catch {
+    // ignore
+  }
   candidates.push(
     '/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell',
     '/usr/bin/chromium',
@@ -68,23 +75,51 @@ function findChromiumExecutable(): string | undefined {
     }
   }
 
-  // Scan /ms-playwright dynamically in case build number varies
-  try {
-    const baseDir = '/ms-playwright';
-    if (fs.existsSync(baseDir)) {
+  const scanBases = [
+    process.env.PLAYWRIGHT_BROWSERS_PATH,
+    '/ms-playwright',
+    path.join(os.homedir(), '.cache', 'ms-playwright'),
+    '/root/.cache/ms-playwright',
+  ].filter((d): d is string => Boolean(d));
+
+  for (const baseDir of scanBases) {
+    try {
+      if (!fs.existsSync(baseDir)) continue;
       const entries = fs.readdirSync(baseDir);
       for (const entry of entries) {
-        const shellPath = path.join(baseDir, entry, 'chrome-headless-shell-linux64', 'chrome-headless-shell');
-        if (fs.existsSync(shellPath)) return shellPath;
-        const chromePath = path.join(baseDir, entry, 'chrome-linux', 'chrome');
-        if (fs.existsSync(chromePath)) return chromePath;
+        const subPaths = [
+          path.join(baseDir, entry, 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
+          path.join(baseDir, entry, 'chrome-linux64', 'chrome'),
+          path.join(baseDir, entry, 'chrome-linux', 'chrome'),
+        ];
+        for (const p of subPaths) {
+          if (fs.existsSync(p)) return p;
+        }
       }
+    } catch {
+      // ignore scan errors
     }
-  } catch {
-    // ignore scan errors
   }
 
   return undefined;
+}
+
+async function ensureChromiumExecutable(): Promise<string | undefined> {
+  const existing = findChromiumExecutable();
+  if (existing) return existing;
+
+  const cliPath = path.join(process.cwd(), 'node_modules', 'playwright-core', 'cli.js');
+  if (fs.existsSync(cliPath)) {
+    try {
+      console.log('No cached Chromium found in container; installing chromium-headless-shell...');
+      await execFileAsync(process.execPath, [cliPath, 'install', 'chromium-headless-shell'], {
+        timeout: 120000,
+      });
+    } catch (err) {
+      console.warn('Auto-install of chromium-headless-shell failed:', err instanceof Error ? err.message : err);
+    }
+  }
+  return findChromiumExecutable();
 }
 
 function buildCurlProxyUrl(proxy: ProxyConfig): string | null {
@@ -177,7 +212,7 @@ export class BrowserManager {
   private async launchBrowserAndContext(): Promise<void> {
     await this.teardown();
 
-    const executablePath = findChromiumExecutable();
+    const executablePath = await ensureChromiumExecutable();
     const launchOptions: Parameters<typeof chromium.launch>[0] = {
       headless: true,
       args: [
