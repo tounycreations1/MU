@@ -707,6 +707,15 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
     }
   };
 
+  const handleScreenPaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    if (isVercelMode) return;
+    const pasted = e.clipboardData?.getData('text');
+    if (pasted) {
+      e.preventDefault();
+      onKeyboard('type', pasted);
+    }
+  };
+
   const handleAddressSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onNavigate(addressInput);
@@ -818,6 +827,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
             }}
             onWheel={handleWheel}
             onKeyDown={handleScreenKeyDown}
+            onPaste={handleScreenPaste}
             style={{ width: displayW, height: displayH }}
             className={`relative bg-white overflow-hidden outline-none ${
               state.inspectMode ? 'cursor-crosshair' : isVercelMode ? 'cursor-default' : 'cursor-pointer'

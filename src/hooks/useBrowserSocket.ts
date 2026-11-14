@@ -129,7 +129,7 @@ const INITIAL_STATE: BrowserState = {
 export function useBrowserSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const sseRef = useRef<EventSource | null>(null);
-  const transportRef = useRef<'ws' | 'sse' | 'vercel'>('ws');
+  const transportRef = useRef<'ws' | 'sse' | 'vercel' | 'vercel-chromium'>('ws');
   const wsFailCountRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const unmountedRef = useRef(false);
@@ -148,7 +148,7 @@ export function useBrowserSocket() {
   const [storage, setStorage] = useState<StorageSnapshot | null>(null);
   const [socketError, setSocketError] = useState<string | null>(null);
 
-  // Refs for stateful Vercel Proxy Engine Mode
+  // Refs for stateful Vercel Proxy Engine Mode & Vercel Chromium Engine Mode
   const stateRef = useRef<BrowserState>(INITIAL_STATE);
   stateRef.current = state;
   const proxyCredsRef = useRef<Map<string, ProxyProfile>>(
@@ -160,6 +160,13 @@ export function useBrowserSocket() {
   const networkDetailRef = useRef<Map<string, NetworkEntry>>(new Map());
   const shadowBridgeRef = useRef<ShadowDomBridge | null>(null);
   const vercelBootedRef = useRef(false);
+  const vcBootedRef = useRef(false);
+  const vcQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const vcCookiesRef = useRef<CookieItem[]>([]);
+  const vcTypeBufferRef = useRef<string>('');
+  const vcTypeTimerRef = useRef<number | null>(null);
+  const vcWheelAccumRef = useRef<{ x: number; y: number; deltaX: number; deltaY: number } | null>(null);
+  const vcWheelTimerRef = useRef<number | null>(null);
 
   const registerShadowBridge = useCallback((bridge: ShadowDomBridge | null) => {
     shadowBridgeRef.current = bridge;
@@ -572,7 +579,7 @@ export function useBrowserSocket() {
   }, []);
 
   const checkHealthMode = useCallback(
-    async (base: string): Promise<'chromium' | 'vercel-proxy' | 'missing'> => {
+    async (base: string): Promise<'chromium' | 'vercel-chromium' | 'vercel-proxy' | 'missing'> => {
       try {
         const res = await fetch(`${base}/api/health`, {
           method: 'GET',
@@ -589,7 +596,9 @@ export function useBrowserSocket() {
           return 'missing';
         }
         setSocketError(null);
-        return data.mode === 'vercel-proxy' ? 'vercel-proxy' : 'chromium';
+        if (data.mode === 'vercel-chromium') return 'vercel-chromium';
+        if (data.mode === 'vercel-proxy') return 'vercel-proxy';
+        return 'chromium';
       } catch (err) {
         setSocketError(err instanceof Error ? err.message : 'Unable to reach /api/health');
         return 'missing';
@@ -625,6 +634,299 @@ export function useBrowserSocket() {
     [navigateVercel, pushConsoleLog, verifyVercelProxy],
   );
 
+  const buildVcRestoreSnapshot = useCallback(() => {
+    const cur = stateRef.current;
+    const proxyPayload = getVercelProxyPayload().proxy;
+    const customProfiles = Array.from(proxyCredsRef.current.values()).filter((p) =>
+      p.id.startsWith('custom-'),
+    );
+    return {
+      url: cur.url,
+      cookies: vcCookiesRef.current,
+      deviceId: cur.deviceId,
+      orientation: cur.orientation,
+      blockTrackers: cur.blockTrackers,
+      inspectMode: cur.inspectMode,
+      activeProxyId: cur.activeProxyId,
+      proxy: proxyPayload,
+      customProfiles,
+    };
+  }, [getVercelProxyPayload]);
+
+  const dispatchVercelChromiumRequest = useCallback(
+    async (
+      payload: Record<string, unknown>,
+      options?: { baseOverride?: string; fallbackOnFail?: boolean },
+    ) => {
+      const base = resolveHttpBase(options?.baseOverride);
+      const type = String(payload.type || 'init');
+
+      if (type === 'addProxyProfile') {
+        const server = String(payload.server || '').trim();
+        if (server) {
+          const id = `custom-${Date.now()}`;
+          proxyCredsRef.current.set(id, {
+            id,
+            label: String(payload.label || '').trim() || server.replace(/^https?:\/\//, ''),
+            locationHint: server.replace(/^https?:\/\//, ''),
+            server,
+            username: String(payload.username || '').trim(),
+            password: String(payload.password || ''),
+          });
+        }
+      } else if (type === 'updateProxy') {
+        if (typeof payload.password === 'string' && payload.password !== '••••••••') {
+          customProxyPassRef.current = payload.password;
+        }
+      } else if (type === 'newIdentity') {
+        vcCookiesRef.current = [];
+        setDomTree(null);
+        setInspectedElement(null);
+        setHighlightRect(null);
+      }
+
+      if (
+        [
+          'init',
+          'navigate',
+          'back',
+          'forward',
+          'reload',
+          'pointer',
+          'keyboard',
+          'setDevice',
+          'selectProxyProfile',
+          'addProxyProfile',
+          'updateProxy',
+          'newIdentity',
+        ].includes(type)
+      ) {
+        setState((prev) => ({ ...prev, loading: true, lastError: null }));
+      }
+
+      try {
+        const res = await fetch(`${base}/api/vercel-chromium`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...payload,
+            restore: buildVcRestoreSnapshot(),
+          }),
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          error?: string;
+          frameDataUrl?: string | null;
+          cookies?: CookieItem[];
+          domTree?: DomNodeSummary | null;
+          inspectedElement?: InspectedElement | null;
+          highlightRect?: HighlightRect | null;
+          storage?: StorageSnapshot | null;
+          screenshotData?: string;
+          network?: NetworkEntry[];
+          console?: ConsoleEntry[];
+          state?: BrowserState;
+        };
+
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+
+        if (typeof data.frameDataUrl === 'string') {
+          setFrameDataUrl(data.frameDataUrl);
+        }
+        if (Array.isArray(data.cookies)) {
+          vcCookiesRef.current = data.cookies;
+        }
+        if (Array.isArray(data.network)) {
+          setNetwork(data.network);
+        }
+        if (Array.isArray(data.console)) {
+          setConsoleLogs(data.console);
+        }
+        if (data.domTree !== undefined) {
+          setDomTree(data.domTree ?? null);
+        }
+        if (data.inspectedElement !== undefined) {
+          setInspectedElement(data.inspectedElement ?? null);
+        }
+        if (data.highlightRect !== undefined) {
+          setHighlightRect(data.highlightRect ?? null);
+        }
+        if (data.storage !== undefined) {
+          setStorage(data.storage ?? null);
+        }
+        if (typeof data.screenshotData === 'string') {
+          const link = document.createElement('a');
+          link.href = `data:image/png;base64,${data.screenshotData}`;
+          link.download = `stealthview-mobile-${Date.now()}.png`;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        }
+        if (data.state) {
+          setState(data.state);
+        } else {
+          setState((prev) => ({ ...prev, loading: false }));
+        }
+        setSocketError(null);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Serverless Chromium request failed';
+        setState((prev) => ({ ...prev, loading: false, lastError: message }));
+        pushConsoleLog('error', message, 'vercel-chromium');
+        if (options?.fallbackOnFail) {
+          pushConsoleLog(
+            'warn',
+            'Falling back to zero-iframe Shadow DOM proxy renderer.',
+            'runtime',
+          );
+          activateVercelMode(base);
+        }
+      }
+    },
+    [activateVercelMode, buildVcRestoreSnapshot, pushConsoleLog, resolveHttpBase],
+  );
+
+  const enqueueVercelChromium = useCallback(
+    (
+      payload: Record<string, unknown>,
+      options?: { baseOverride?: string; fallbackOnFail?: boolean },
+    ) => {
+      vcQueueRef.current = vcQueueRef.current
+        .then(() => dispatchVercelChromiumRequest(payload, options))
+        .catch(() => {
+          // errors already handled inside dispatchVercelChromiumRequest
+        });
+    },
+    [dispatchVercelChromiumRequest],
+  );
+
+  const sendVercelChromiumCommand = useCallback(
+    (payload: Record<string, unknown>) => {
+      const type = String(payload.type || '');
+      if ((type === 'inspectAt' || type === 'inspectSelector') && !payload.selectElement) {
+        return;
+      }
+      if (type === 'setInspectMode') {
+        const enabled = Boolean(payload.enabled);
+        setState((prev) => ({ ...prev, inspectMode: enabled }));
+        if (!enabled) setHighlightRect(null);
+      }
+
+      if (type === 'wheel') {
+        const x = Number(payload.x) || 0;
+        const y = Number(payload.y) || 0;
+        const dx = Number(payload.deltaX) || 0;
+        const dy = Number(payload.deltaY) || 0;
+        if (vcWheelAccumRef.current) {
+          vcWheelAccumRef.current.x = x;
+          vcWheelAccumRef.current.y = y;
+          vcWheelAccumRef.current.deltaX += dx;
+          vcWheelAccumRef.current.deltaY += dy;
+        } else {
+          vcWheelAccumRef.current = { x, y, deltaX: dx, deltaY: dy };
+        }
+        if (vcWheelTimerRef.current === null) {
+          vcWheelTimerRef.current = window.setTimeout(() => {
+            vcWheelTimerRef.current = null;
+            const acc = vcWheelAccumRef.current;
+            vcWheelAccumRef.current = null;
+            if (acc && (Math.abs(acc.deltaX) > 0.5 || Math.abs(acc.deltaY) > 0.5)) {
+              enqueueVercelChromium({
+                type: 'wheel',
+                x: acc.x,
+                y: acc.y,
+                deltaX: Math.round(acc.deltaX),
+                deltaY: Math.round(acc.deltaY),
+              });
+            }
+          }, 120);
+        }
+        return;
+      }
+
+      if (type === 'keyboard' && payload.action === 'type' && typeof payload.text === 'string') {
+        vcTypeBufferRef.current += payload.text;
+        if (vcTypeTimerRef.current !== null) {
+          window.clearTimeout(vcTypeTimerRef.current);
+        }
+        vcTypeTimerRef.current = window.setTimeout(() => {
+          vcTypeTimerRef.current = null;
+          const textToSend = vcTypeBufferRef.current;
+          vcTypeBufferRef.current = '';
+          if (textToSend) {
+            enqueueVercelChromium({
+              type: 'keyboard',
+              action: 'type',
+              text: textToSend,
+            });
+          }
+        }, 160);
+        return;
+      }
+
+      // Flush any buffered typing or wheel deltas before dispatching click/key/navigation
+      if (vcWheelTimerRef.current !== null) {
+        window.clearTimeout(vcWheelTimerRef.current);
+        vcWheelTimerRef.current = null;
+      }
+      if (vcWheelAccumRef.current) {
+        const acc = vcWheelAccumRef.current;
+        vcWheelAccumRef.current = null;
+        if (Math.abs(acc.deltaX) > 0.5 || Math.abs(acc.deltaY) > 0.5) {
+          enqueueVercelChromium({
+            type: 'wheel',
+            x: acc.x,
+            y: acc.y,
+            deltaX: Math.round(acc.deltaX),
+            deltaY: Math.round(acc.deltaY),
+          });
+        }
+      }
+      if (vcTypeTimerRef.current !== null) {
+        window.clearTimeout(vcTypeTimerRef.current);
+        vcTypeTimerRef.current = null;
+      }
+      if (vcTypeBufferRef.current) {
+        const buffered = vcTypeBufferRef.current;
+        vcTypeBufferRef.current = '';
+        enqueueVercelChromium({ type: 'keyboard', action: 'type', text: buffered });
+      }
+
+      enqueueVercelChromium(payload);
+    },
+    [enqueueVercelChromium],
+  );
+
+  const activateVercelChromiumMode = useCallback(
+    (base: string) => {
+      transportRef.current = 'vercel-chromium';
+      setEngineMode('vercel-chromium');
+      setWsStatus('open');
+      setSocketError(null);
+      setState((prev) => ({
+        ...prev,
+        connected: true,
+        loading: true,
+        lastError: null,
+      }));
+      if (!vcBootedRef.current) {
+        vcBootedRef.current = true;
+        pushConsoleLog(
+          'info',
+          'Booting headless mobile Chromium engine via @sparticuz/chromium...',
+          'runtime',
+        );
+        enqueueVercelChromium(
+          { type: 'init', url: stateRef.current.url || 'https://ipv4.webshare.io/' },
+          { baseOverride: base, fallbackOnFail: true },
+        );
+      }
+    },
+    [enqueueVercelChromium, pushConsoleLog],
+  );
+
   const connectSse = useCallback(
     async (base: string) => {
       if (unmountedRef.current) return;
@@ -637,6 +939,10 @@ export function useBrowserSocket() {
       if (mode === 'missing') {
         setEngineMode('backend-missing');
         setWsStatus('backend-missing');
+        return;
+      }
+      if (mode === 'vercel-chromium') {
+        activateVercelChromiumMode(base);
         return;
       }
       if (mode === 'vercel-proxy') {
@@ -669,7 +975,7 @@ export function useBrowserSocket() {
         }
       };
     },
-    [activateVercelMode, checkHealthMode, handleServerMessage],
+    [activateVercelChromiumMode, activateVercelMode, checkHealthMode, handleServerMessage],
   );
 
   const connectWs = useCallback(
@@ -689,6 +995,11 @@ export function useBrowserSocket() {
       if (mode === 'missing') {
         setEngineMode('backend-missing');
         setWsStatus('backend-missing');
+        return;
+      }
+
+      if (mode === 'vercel-chromium') {
+        activateVercelChromiumMode(base);
         return;
       }
 
@@ -756,7 +1067,14 @@ export function useBrowserSocket() {
         }
       };
     },
-    [activateVercelMode, checkHealthMode, connectSse, handleServerMessage, resolveHttpBase],
+    [
+      activateVercelChromiumMode,
+      activateVercelMode,
+      checkHealthMode,
+      connectSse,
+      handleServerMessage,
+      resolveHttpBase,
+    ],
   );
 
   useEffect(() => {
@@ -765,6 +1083,8 @@ export function useBrowserSocket() {
     return () => {
       unmountedRef.current = true;
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+      if (vcTypeTimerRef.current !== null) window.clearTimeout(vcTypeTimerRef.current);
+      if (vcWheelTimerRef.current !== null) window.clearTimeout(vcWheelTimerRef.current);
       wsRef.current?.close();
       sseRef.current?.close();
     };
@@ -784,6 +1104,7 @@ export function useBrowserSocket() {
       }
       wsFailCountRef.current = 0;
       vercelBootedRef.current = false;
+      vcBootedRef.current = false;
       setBackendUrlState(normalized);
       setWsStatus('connecting');
       setSocketError(null);
@@ -1115,6 +1436,10 @@ export function useBrowserSocket() {
 
   const send = useCallback(
     (payload: Record<string, unknown>) => {
+      if (transportRef.current === 'vercel-chromium') {
+        sendVercelChromiumCommand(payload);
+        return;
+      }
       if (transportRef.current === 'vercel') {
         sendVercelCommand(payload);
         return;
@@ -1142,13 +1467,28 @@ export function useBrowserSocket() {
           // ignore transient network errors
         });
     },
-    [handleServerMessage, resolveHttpBase, sendVercelCommand],
+    [handleServerMessage, resolveHttpBase, sendVercelChromiumCommand, sendVercelCommand],
   );
 
   const fetchNetworkDetail = useCallback(
     async (id: string): Promise<NetworkEntry | null> => {
       if (transportRef.current === 'vercel') {
         return networkDetailRef.current.get(id) ?? null;
+      }
+      if (transportRef.current === 'vercel-chromium') {
+        try {
+          const base = resolveHttpBase();
+          const res = await fetch(`${base}/api/vercel-chromium`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'getNetworkDetail', id }),
+          });
+          if (!res.ok) return null;
+          const data = (await res.json()) as { ok?: boolean; entry?: NetworkEntry | null };
+          return data.entry ?? null;
+        } catch {
+          return null;
+        }
       }
       try {
         const base = resolveHttpBase();

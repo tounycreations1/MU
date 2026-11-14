@@ -10,7 +10,7 @@ export default async function handler(req, res) {
 
   sendJson(res, 200, {
     ok: true,
-    mode: 'vercel-proxy',
+    mode: 'vercel-chromium',
     runtime: 'vercel-serverless',
   });
 }
