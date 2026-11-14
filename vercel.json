@@ -2,8 +2,11 @@
   "functions": {
     "api/vercel-chromium.js": {
       "maxDuration": 60,
-      "memory": 1024,
+      "memory": 2048,
       "includeFiles": "node_modules/@sparticuz/chromium/bin/**"
     }
-  }
+  },
+  "regions": [
+    "iad1"
+  ]
 }

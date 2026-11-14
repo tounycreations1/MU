@@ -220,7 +220,7 @@ async function createContextAndPage(store, cookiesToRestore = []) {
 
   const ctxOptions = {
     viewport: vp,
-    deviceScaleFactor: Math.min(device.deviceScaleFactor, 2),
+    deviceScaleFactor: Math.min(device.deviceScaleFactor, 1.5),
     isMobile: device.isMobile,
     hasTouch: device.hasTouch,
     userAgent: device.userAgent,
@@ -383,7 +383,7 @@ async function applyThrottling(store, mode) {
 async function captureFrame(page) {
   if (!page || page.isClosed()) return null;
   try {
-    const buf = await page.screenshot({ type: 'jpeg', quality: 78 });
+    const buf = await page.screenshot({ type: 'jpeg', quality: 60 });
     return `data:image/jpeg;base64,${buf.toString('base64')}`;
   } catch {
     return null;
@@ -441,7 +441,7 @@ async function safeGoto(page, store, url) {
   const target = normalizeUrl(url);
   try {
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 18000 });
-    await page.waitForTimeout(450);
+    await page.waitForTimeout(150);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const landed = page.url();
@@ -719,15 +719,15 @@ export default async function handler(req, res) {
         break;
       case 'back':
         await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-        await page.waitForTimeout(300);
+        await page.waitForTimeout(100);
         break;
       case 'forward':
         await page.goForward({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-        await page.waitForTimeout(300);
+        await page.waitForTimeout(100);
         break;
       case 'reload':
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-        await page.waitForTimeout(350);
+        await page.waitForTimeout(120);
         break;
       case 'pointer': {
         const x = Number(body.x) || 0;
@@ -735,10 +735,10 @@ export default async function handler(req, res) {
         if (body.action === 'tap' || body.action === 'up') {
           const prevCount = store.networkEntries.length;
           await page.mouse.click(x, y).catch(() => {});
-          await page.waitForTimeout(280);
+          await page.waitForTimeout(120);
           // If clicking triggered a new XHR/fetch/navigation, allow up to ~1s for it to finish rendering
           if (store.networkEntries.length > prevCount) {
-            const deadline = Date.now() + 2000;
+            const deadline = Date.now() + 1500;
             while (
               Date.now() < deadline &&
               store.networkEntries
@@ -749,9 +749,9 @@ export default async function handler(req, res) {
                     ['document', 'xhr', 'fetch'].includes(e.resourceType),
                 )
             ) {
-              await page.waitForTimeout(90);
+              await page.waitForTimeout(40);
             }
-            await page.waitForTimeout(220);
+            await page.waitForTimeout(100);
           }
         }
         break;
@@ -763,17 +763,17 @@ export default async function handler(req, res) {
         const dy = Number(body.deltaY) || 0;
         await page.mouse.move(x, y).catch(() => {});
         await page.mouse.wheel(dx, dy).catch(() => {});
-        await page.waitForTimeout(90);
+        await page.waitForTimeout(40);
         break;
       }
       case 'keyboard': {
         if (body.action === 'type' && typeof body.text === 'string') {
-          await page.keyboard.type(body.text, { delay: 10 }).catch(() => {});
-          await page.waitForTimeout(150);
+          await page.keyboard.type(body.text, { delay: 0 }).catch(() => {});
+          await page.waitForTimeout(60);
         } else if (body.action === 'key' && typeof body.key === 'string') {
           const prevCount = store.networkEntries.length;
           await page.keyboard.press(body.key).catch(() => {});
-          await page.waitForTimeout(280);
+          await page.waitForTimeout(120);
           if (store.networkEntries.length > prevCount) {
             const deadline = Date.now() + 900;
             while (
@@ -786,9 +786,9 @@ export default async function handler(req, res) {
                     ['document', 'xhr', 'fetch'].includes(e.resourceType),
                 )
             ) {
-              await page.waitForTimeout(90);
+              await page.waitForTimeout(40);
             }
-            await page.waitForTimeout(150);
+            await page.waitForTimeout(60);
           }
         }
         break;
