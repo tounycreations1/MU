@@ -14,6 +14,8 @@ export default function App() {
 
   const {
     wsStatus,
+    backendUrl,
+    setBackendUrl,
     socketError,
     state,
     frameDataUrl,
@@ -26,6 +28,12 @@ export default function App() {
     send,
     fetchNetworkDetail,
   } = useBrowserSocket();
+
+  const [backendInput, setBackendInput] = useState(backendUrl);
+
+  useEffect(() => {
+    setBackendInput(backendUrl);
+  }, [backendUrl]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -126,8 +134,43 @@ export default function App() {
         </div>
       </header>
 
+      {/* Static Deployment / Missing Backend Notice */}
+      {wsStatus === 'backend-missing' && (
+        <div className="px-5 py-2.5 bg-red-500/10 border-b border-red-500/20 flex items-center justify-between gap-4 flex-wrap text-xs text-red-700 dark:text-red-300 shrink-0">
+          <div className="min-w-0">
+            <span className="font-semibold">Headless browser backend not detected at this origin.</span>{' '}
+            <span>
+              Static hosts (like Vercel) only serve <code className="font-mono">dist/</code> and do not run{' '}
+              <code className="font-mono">server.ts</code> / Chromium. Run <code className="font-mono">npm run build &amp;&amp; npm start</code> on a Node/Docker host (Cloud Run, Railway, Render, Fly.io) or connect your backend URL:
+            </span>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              setBackendUrl(backendInput);
+            }}
+            className="flex items-center gap-2 shrink-0"
+          >
+            <input
+              type="url"
+              value={backendInput}
+              onChange={(e) => setBackendInput(e.target.value)}
+              placeholder="https://your-node-backend.example.com"
+              aria-label="Remote backend server URL"
+              className="h-7 w-64 px-2.5 text-xs font-mono bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded focus:outline-none focus:border-sky-500"
+            />
+            <button
+              type="submit"
+              className="h-7 px-3 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded transition-colors whitespace-nowrap shrink-0"
+            >
+              Connect
+            </button>
+          </form>
+        </div>
+      )}
+
       {/* Connection / Navigation Error Banner */}
-      {(socketError || state.lastError || wsStatus === 'reconnecting') && (
+      {wsStatus !== 'backend-missing' && (socketError || state.lastError || wsStatus === 'reconnecting') && (
         <div className="px-5 py-1.5 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between gap-4 text-xs text-amber-700 dark:text-amber-300 shrink-0">
           <span className="truncate">
             {wsStatus === 'reconnecting'

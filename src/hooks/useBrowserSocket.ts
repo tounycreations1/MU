@@ -10,7 +10,21 @@ import type {
   StorageSnapshot,
 } from '../types/browser.ts';
 
-export type WsStatus = 'connecting' | 'open' | 'reconnecting' | 'error';
+export type WsStatus = 'connecting' | 'open' | 'reconnecting' | 'backend-missing' | 'error';
+
+const BACKEND_URL_STORAGE_KEY = 'stealthview_backend_url';
+
+function getInitialBackendUrl(): string {
+  const envUrl = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.trim();
+  if (envUrl) return envUrl.replace(/\/+$/, '');
+  try {
+    const saved = window.localStorage.getItem(BACKEND_URL_STORAGE_KEY)?.trim();
+    if (saved) return saved.replace(/\/+$/, '');
+  } catch {
+    // ignore storage access issues
+  }
+  return '';
+}
 
 const INITIAL_STATE: BrowserState = {
   connected: false,
@@ -54,6 +68,7 @@ export function useBrowserSocket() {
   const reconnectTimerRef = useRef<number | null>(null);
   const unmountedRef = useRef(false);
 
+  const [backendUrl, setBackendUrlState] = useState<string>(getInitialBackendUrl);
   const [wsStatus, setWsStatus] = useState<WsStatus>('connecting');
   const [state, setState] = useState<BrowserState>(INITIAL_STATE);
   const [frameDataUrl, setFrameDataUrl] = useState<string | null>(null);
@@ -64,6 +79,14 @@ export function useBrowserSocket() {
   const [highlightRect, setHighlightRect] = useState<HighlightRect | null>(null);
   const [storage, setStorage] = useState<StorageSnapshot | null>(null);
   const [socketError, setSocketError] = useState<string | null>(null);
+
+  const resolveHttpBase = useCallback(
+    (override?: string) => {
+      const base = override !== undefined ? override : backendUrl;
+      return base ? base.replace(/\/+$/, '') : '';
+    },
+    [backendUrl],
+  );
 
   const handleServerMessage = useCallback((rawJson: string) => {
     try {
@@ -143,99 +166,140 @@ export function useBrowserSocket() {
     }
   }, []);
 
-  const connectSse = useCallback(() => {
-    if (unmountedRef.current) return;
-    if (sseRef.current) {
-      sseRef.current.close();
-      sseRef.current = null;
+  const verifyBackendReachable = useCallback(async (base: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`${base}/api/health`, { method: 'GET' });
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        return false;
+      }
+      const data = (await res.json()) as { ok?: boolean };
+      return Boolean(data && data.ok);
+    } catch {
+      return false;
     }
+  }, []);
 
-    transportRef.current = 'sse';
-    const es = new EventSource('/api/session/stream');
-    sseRef.current = es;
-
-    es.onopen = () => {
-      setWsStatus('open');
-      setSocketError(null);
-    };
-
-    es.onmessage = (event) => {
-      handleServerMessage(event.data);
-    };
-
-    es.onerror = () => {
+  const connectSse = useCallback(
+    async (base: string) => {
       if (unmountedRef.current) return;
-      if (es.readyState === EventSource.CLOSED) {
-        setWsStatus('reconnecting');
-        if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = window.setTimeout(() => {
-          connectSse();
-        }, 1500);
-      }
-    };
-  }, [handleServerMessage]);
-
-  const connectWs = useCallback(() => {
-    if (unmountedRef.current) return;
-    if (
-      wsRef.current &&
-      (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
-    }
-
-    transportRef.current = 'ws';
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/ws`;
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    let opened = false;
-    const openTimeout = window.setTimeout(() => {
-      if (!opened && ws.readyState !== WebSocket.OPEN) {
-        ws.close();
-      }
-    }, 3500);
-
-    ws.onopen = () => {
-      opened = true;
-      window.clearTimeout(openTimeout);
-      wsFailCountRef.current = 0;
-      setWsStatus('open');
-      setSocketError(null);
-    };
-
-    ws.onmessage = (event) => {
-      handleServerMessage(event.data as string);
-    };
-
-    ws.onclose = () => {
-      window.clearTimeout(openTimeout);
-      if (unmountedRef.current) return;
-
-      if (!opened) {
-        wsFailCountRef.current += 1;
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
       }
 
-      // If WebSocket fails to establish in deployed proxy environments, switch seamlessly to SSE + HTTP POST
-      if (wsFailCountRef.current >= 1) {
-        connectSse();
+      const reachable = await verifyBackendReachable(base);
+      if (!reachable) {
+        setWsStatus('backend-missing');
         return;
       }
 
-      setWsStatus('reconnecting');
-      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = window.setTimeout(() => {
-        connectWs();
-      }, 1200);
-    };
+      transportRef.current = 'sse';
+      const es = new EventSource(`${base}/api/session/stream`);
+      sseRef.current = es;
 
-    ws.onerror = () => {
-      if (!opened) {
-        wsFailCountRef.current += 1;
+      es.onopen = () => {
+        setWsStatus('open');
+        setSocketError(null);
+      };
+
+      es.onmessage = (event) => {
+        handleServerMessage(event.data);
+      };
+
+      es.onerror = () => {
+        if (unmountedRef.current) return;
+        if (es.readyState === EventSource.CLOSED) {
+          setWsStatus('reconnecting');
+          if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = window.setTimeout(() => {
+            connectSse(base);
+          }, 1500);
+        }
+      };
+    },
+    [handleServerMessage, verifyBackendReachable],
+  );
+
+  const connectWs = useCallback(
+    async (overrideBase?: string) => {
+      if (unmountedRef.current) return;
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
       }
-    };
-  }, [connectSse, handleServerMessage]);
+      wsRef.current?.close();
+      sseRef.current?.close();
+
+      const base = resolveHttpBase(overrideBase);
+      const reachable = await verifyBackendReachable(base);
+      if (unmountedRef.current) return;
+
+      if (!reachable) {
+        setWsStatus('backend-missing');
+        return;
+      }
+
+      transportRef.current = 'ws';
+      let wsUrl = '';
+      if (base) {
+        const parsed = new URL(base);
+        const wsProto = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${wsProto}//${parsed.host}/ws`;
+      } else {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${proto}//${window.location.host}/ws`;
+      }
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      let opened = false;
+      const openTimeout = window.setTimeout(() => {
+        if (!opened && ws.readyState !== WebSocket.OPEN) {
+          ws.close();
+        }
+      }, 3500);
+
+      ws.onopen = () => {
+        opened = true;
+        window.clearTimeout(openTimeout);
+        wsFailCountRef.current = 0;
+        setWsStatus('open');
+        setSocketError(null);
+      };
+
+      ws.onmessage = (event) => {
+        handleServerMessage(event.data as string);
+      };
+
+      ws.onclose = () => {
+        window.clearTimeout(openTimeout);
+        if (unmountedRef.current) return;
+
+        if (!opened) {
+          wsFailCountRef.current += 1;
+        }
+
+        if (wsFailCountRef.current >= 1) {
+          connectSse(base);
+          return;
+        }
+
+        setWsStatus('reconnecting');
+        reconnectTimerRef.current = window.setTimeout(() => {
+          connectWs(base);
+        }, 1200);
+      };
+
+      ws.onerror = () => {
+        if (!opened) {
+          wsFailCountRef.current += 1;
+        }
+      };
+    },
+    [connectSse, handleServerMessage, resolveHttpBase, verifyBackendReachable],
+  );
 
   useEffect(() => {
     unmountedRef.current = false;
@@ -248,6 +312,27 @@ export function useBrowserSocket() {
     };
   }, [connectWs]);
 
+  const setBackendUrl = useCallback(
+    (nextUrl: string) => {
+      const normalized = nextUrl.trim().replace(/\/+$/, '');
+      try {
+        if (normalized) {
+          window.localStorage.setItem(BACKEND_URL_STORAGE_KEY, normalized);
+        } else {
+          window.localStorage.removeItem(BACKEND_URL_STORAGE_KEY);
+        }
+      } catch {
+        // ignore storage errors
+      }
+      wsFailCountRef.current = 0;
+      setBackendUrlState(normalized);
+      setWsStatus('connecting');
+      setSocketError(null);
+      connectWs(normalized);
+    },
+    [connectWs],
+  );
+
   const send = useCallback(
     (payload: Record<string, unknown>) => {
       const ws = wsRef.current;
@@ -256,7 +341,8 @@ export function useBrowserSocket() {
         return;
       }
 
-      fetch('/api/session/command', {
+      const base = resolveHttpBase();
+      fetch(`${base}/api/session/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -271,21 +357,27 @@ export function useBrowserSocket() {
           // ignore transient network errors
         });
     },
-    [handleServerMessage],
+    [handleServerMessage, resolveHttpBase],
   );
 
-  const fetchNetworkDetail = useCallback(async (id: string): Promise<NetworkEntry | null> => {
-    try {
-      const res = await fetch(`/api/network/${encodeURIComponent(id)}`);
-      if (!res.ok) return null;
-      return (await res.json()) as NetworkEntry;
-    } catch {
-      return null;
-    }
-  }, []);
+  const fetchNetworkDetail = useCallback(
+    async (id: string): Promise<NetworkEntry | null> => {
+      try {
+        const base = resolveHttpBase();
+        const res = await fetch(`${base}/api/network/${encodeURIComponent(id)}`);
+        if (!res.ok) return null;
+        return (await res.json()) as NetworkEntry;
+      } catch {
+        return null;
+      }
+    },
+    [resolveHttpBase],
+  );
 
   return {
     wsStatus,
+    backendUrl,
+    setBackendUrl,
     socketError,
     state,
     frameDataUrl,
