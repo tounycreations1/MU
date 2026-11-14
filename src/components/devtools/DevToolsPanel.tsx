@@ -59,6 +59,12 @@ interface DevToolsPanelProps {
   onRefreshStorage: () => void;
   onDeleteCookie: (name: string, domain: string) => void;
   onClearStorage: () => void;
+  onClearBrowsingData: (options: {
+    cookies: boolean;
+    cache: boolean;
+    storage: boolean;
+    history: boolean;
+  }) => void;
   onVerifyProxy: () => void;
   onSelectProxyProfile: (profileId: string) => void;
   onAddProxyProfile: (profile: {
@@ -102,6 +108,7 @@ export const DevToolsPanel: React.FC<DevToolsPanelProps> = ({
   onRefreshStorage,
   onDeleteCookie,
   onClearStorage,
+  onClearBrowsingData,
   onVerifyProxy,
   onSelectProxyProfile,
   onAddProxyProfile,
@@ -111,12 +118,31 @@ export const DevToolsPanel: React.FC<DevToolsPanelProps> = ({
   onNavigateIpCheck,
 }) => {
   const [quickTypeText, setQuickTypeText] = useState('');
+  const [showClearModal, setShowClearModal] = useState(false);
+  const [clearCookies, setClearCookies] = useState(true);
+  const [clearCache, setClearCache] = useState(true);
+  const [clearSiteStorage, setClearSiteStorage] = useState(true);
+  const [clearHistory, setClearHistory] = useState(true);
+  const [justCleared, setJustCleared] = useState(false);
 
   const handleQuickTypeSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!quickTypeText) return;
     onKeyboard('type', quickTypeText);
     setQuickTypeText('');
+  };
+
+  const handleConfirmClearData = (e: React.FormEvent) => {
+    e.preventDefault();
+    onClearBrowsingData({
+      cookies: clearCookies,
+      cache: clearCache,
+      storage: clearSiteStorage,
+      history: clearHistory,
+    });
+    setShowClearModal(false);
+    setJustCleared(true);
+    window.setTimeout(() => setJustCleared(false), 2500);
   };
 
   const errorCount = consoleLogs.filter((c) =>
@@ -142,10 +168,10 @@ export const DevToolsPanel: React.FC<DevToolsPanelProps> = ({
   ];
 
   return (
-    <section className="flex flex-col h-full min-h-0 bg-white dark:bg-[#0F172A]">
+    <section className="flex flex-col h-full min-h-0 bg-white dark:bg-[#0F172A] relative">
       {/* Right-Side Mobile & Browser Controls Dock */}
       <div className="px-3.5 py-2.5 bg-slate-50/80 dark:bg-[#111827] border-b border-slate-200 dark:border-slate-800 space-y-2 shrink-0">
-        {/* Device, Orientation, Proxy, Inspect, Capture */}
+        {/* Device, Orientation, Proxy, Inspect, Capture, Clear Data */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2 flex-wrap">
             <div className="flex items-center gap-1.5">
@@ -231,8 +257,93 @@ export const DevToolsPanel: React.FC<DevToolsPanelProps> = ({
               <Camera className="w-3.5 h-3.5" />
               <span>Capture</span>
             </button>
+            <button
+              type="button"
+              onClick={() => setShowClearModal((prev) => !prev)}
+              className={`h-8 px-2.5 flex items-center gap-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+                justCleared
+                  ? 'bg-emerald-600/15 border-emerald-500/40 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 hover:bg-red-500/10'
+              }`}
+              title="Clear cookies, cache, site storage, and browsing history"
+            >
+              <span>{justCleared ? 'Data Cleared' : 'Clear Browsing Data'}</span>
+            </button>
           </div>
         </div>
+
+        {/* Clear Browsing Data Panel (Inline Collapsible Drawer) */}
+        {showClearModal && (
+          <form
+            onSubmit={handleConfirmClearData}
+            className="p-3 bg-white dark:bg-[#0F172A] border border-slate-200 dark:border-slate-700 rounded-lg space-y-2.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                Clear Browsing Data
+              </span>
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                Select data categories to wipe from this mobile browser
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-700 dark:text-slate-300">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clearCookies}
+                  onChange={(e) => setClearCookies(e.target.checked)}
+                  className="rounded border-slate-300 dark:border-slate-700 text-sky-600"
+                />
+                <span>Cookies &amp; site sessions</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clearCache}
+                  onChange={(e) => setClearCache(e.target.checked)}
+                  className="rounded border-slate-300 dark:border-slate-700 text-sky-600"
+                />
+                <span>Cached images &amp; files</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clearSiteStorage}
+                  onChange={(e) => setClearSiteStorage(e.target.checked)}
+                  className="rounded border-slate-300 dark:border-slate-700 text-sky-600"
+                />
+                <span>localStorage, sessionStorage &amp; IndexedDB</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clearHistory}
+                  onChange={(e) => setClearHistory(e.target.checked)}
+                  className="rounded border-slate-300 dark:border-slate-700 text-sky-600"
+                />
+                <span>Browsing history &amp; network/console logs</span>
+              </label>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowClearModal(false)}
+                className="h-7 px-3 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!clearCookies && !clearCache && !clearSiteStorage && !clearHistory}
+                className="h-7 px-3.5 text-xs font-medium bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white rounded transition-colors whitespace-nowrap shrink-0"
+              >
+                Clear Selected Data
+              </button>
+            </div>
+          </form>
+        )}
 
         {/* Bookmarks + Quick Mobile Input Helper */}
         <div className="flex items-center justify-between gap-3 flex-wrap">

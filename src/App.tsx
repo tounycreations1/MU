@@ -215,6 +215,7 @@ export default function App() {
             onRefreshStorage={handleRefreshStorage}
             onDeleteCookie={(name, domain) => send({ type: 'deleteCookie', name, domain })}
             onClearStorage={() => send({ type: 'clearStorage' })}
+            onClearBrowsingData={(options) => send({ type: 'clearBrowsingData', ...options })}
             onVerifyProxy={() => send({ type: 'verifyProxy' })}
             onSelectProxyProfile={(profileId) =>
               send({ type: 'selectProxyProfile', profileId })

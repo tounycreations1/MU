@@ -1238,11 +1238,85 @@ export class BrowserManager {
     if (!this.context || !this.page || this.page.isClosed()) return;
     await this.context.clearCookies();
     await this.page
-      .evaluate(() => {
+      .evaluate(async () => {
         window.localStorage.clear();
         window.sessionStorage.clear();
+        if ('caches' in window) {
+          const keys = await caches.keys().catch(() => []);
+          await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+        }
       })
       .catch(() => {});
+  }
+
+  public async clearBrowsingData(options: {
+    cookies?: boolean;
+    cache?: boolean;
+    storage?: boolean;
+    history?: boolean;
+    reloadPage?: boolean;
+  }): Promise<void> {
+    const clearCookies = options.cookies ?? true;
+    const clearCache = options.cache ?? true;
+    const clearStorage = options.storage ?? true;
+    const clearHistory = options.history ?? true;
+
+    if (clearCookies && this.context) {
+      await this.context.clearCookies().catch(() => {});
+      await this.cdp?.send('Network.clearBrowserCookies').catch(() => {});
+    }
+
+    if (clearCache && this.cdp) {
+      await this.cdp.send('Network.clearBrowserCache').catch(() => {});
+    }
+
+    if (clearStorage && this.page && !this.page.isClosed()) {
+      try {
+        const origin = new URL(this.page.url()).origin;
+        if (origin && origin !== 'null' && this.cdp) {
+          await this.cdp
+            .send('Storage.clearDataForOrigin', {
+              origin,
+              storageTypes: 'appcache,cookies,file_systems,indexeddb,local_storage,shader_cache,websql,service_workers,cache_storage',
+            })
+            .catch(() => {});
+        }
+      } catch {
+        // ignore invalid origin (e.g. about:blank)
+      }
+      await this.page
+        .evaluate(async () => {
+          window.localStorage.clear();
+          window.sessionStorage.clear();
+          if ('caches' in window) {
+            const keys = await caches.keys().catch(() => []);
+            await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+          }
+        })
+        .catch(() => {});
+    }
+
+    if (clearHistory) {
+      this.networkEntries = [];
+      this.networkBodyCache.clear();
+      this.consoleEntries = [];
+      this.blockedCount = 0;
+      this.broadcast({ type: 'network:clear' });
+      this.broadcast({ type: 'console:clear' });
+
+      // Reset browser back/forward history while staying on current or clean page if all data cleared
+      if (clearCookies && clearCache && clearStorage) {
+        const resumeUrl = this.currentUrl || START_URL;
+        await this.launchBrowserAndContext();
+        await this.navigate(resumeUrl, true);
+      }
+    } else if (options.reloadPage) {
+      await this.reload();
+    }
+
+    const storage = await this.getStorageSnapshot();
+    this.broadcast({ type: 'storage', storage });
+    this.emitState();
   }
 
   public async verifyProxyIdentity(emit = true): Promise<ProxyIdentityInfo> {

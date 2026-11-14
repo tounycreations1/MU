@@ -139,6 +139,15 @@ async function startServer() {
         await manager.clearAllStorage();
         reply({ type: 'storage', storage: await manager.getStorageSnapshot() });
         break;
+      case 'clearBrowsingData':
+        await manager.clearBrowsingData({
+          cookies: msg.cookies !== false,
+          cache: msg.cache !== false,
+          storage: msg.storage !== false,
+          history: msg.history !== false,
+          reloadPage: Boolean(msg.reloadPage),
+        });
+        break;
       case 'verifyProxy':
         await manager.verifyProxyIdentity(true);
         break;
