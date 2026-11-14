@@ -1,0 +1,6 @@
+{
+  "name": "StealthView Mobile",
+  "description": "Virtual mobile browser routed through a configurable proxy for anonymous surfing with integrated real-time developer tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
