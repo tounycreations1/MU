@@ -694,6 +694,14 @@ export default async function handler(req, res) {
       page = await createContextAndPage(store, cookies);
       if (cmd !== 'navigate' && restore?.url && restore.url !== 'about:blank') {
         await safeGoto(page, store, restore.url);
+        // A fresh instance reloads the page at the top; put the scroll position back
+        const sx = Number(restore.scrollX) || 0;
+        const sy = Number(restore.scrollY) || 0;
+        if (sx > 0 || sy > 0) {
+          await page.waitForTimeout(150);
+          await page.evaluate(([x, y]) => window.scrollTo(x, y), [sx, sy]).catch(() => {});
+          await page.waitForTimeout(80);
+        }
       }
       if (!store.identity) {
         await verifyIdentityViaProxy(store);
@@ -763,7 +771,7 @@ export default async function handler(req, res) {
         const dy = Number(body.deltaY) || 0;
         await page.mouse.move(x, y).catch(() => {});
         await page.mouse.wheel(dx, dy).catch(() => {});
-        await page.waitForTimeout(40);
+        await page.waitForTimeout(100);
         break;
       }
       case 'keyboard': {
@@ -1036,6 +1044,9 @@ export default async function handler(req, res) {
     }
 
     const frameDataUrl = await captureFrame(page);
+    const scroll = await page
+      .evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) }))
+      .catch(() => null);
     const vp = getViewport(store.deviceId, store.orientation);
     const title = await page.title().catch(() => page.url());
     const cookies = store.context ? await store.context.cookies().catch(() => []) : [];
@@ -1054,6 +1065,7 @@ export default async function handler(req, res) {
     sendJson(res, 200, {
       ok: true,
       frameDataUrl,
+      scroll,
       cookies,
       domTree,
       inspectedElement,

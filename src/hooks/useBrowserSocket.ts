@@ -163,6 +163,8 @@ export function useBrowserSocket() {
   const vcBootedRef = useRef(false);
   const vcQueueRef = useRef<Promise<void>>(Promise.resolve());
   const vcCookiesRef = useRef<CookieItem[]>([]);
+  // Last known page scroll position, sent back so a fresh serverless instance can restore it
+  const vcScrollRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const vcTypeBufferRef = useRef<string>('');
   const vcTypeTimerRef = useRef<number | null>(null);
   const vcWheelAccumRef = useRef<{ x: number; y: number; deltaX: number; deltaY: number } | null>(null);
@@ -643,6 +645,8 @@ export function useBrowserSocket() {
     return {
       url: cur.url,
       cookies: vcCookiesRef.current,
+      scrollX: vcScrollRef.current.x,
+      scrollY: vcScrollRef.current.y,
       deviceId: cur.deviceId,
       orientation: cur.orientation,
       blockTrackers: cur.blockTrackers,
@@ -717,6 +721,7 @@ export function useBrowserSocket() {
           ok?: boolean;
           error?: string;
           frameDataUrl?: string | null;
+          scroll?: { x: number; y: number } | null;
           cookies?: CookieItem[];
           domTree?: DomNodeSummary | null;
           inspectedElement?: InspectedElement | null;
@@ -737,6 +742,9 @@ export function useBrowserSocket() {
         }
         if (Array.isArray(data.cookies)) {
           vcCookiesRef.current = data.cookies;
+        }
+        if (data.scroll && typeof data.scroll.x === 'number' && typeof data.scroll.y === 'number') {
+          vcScrollRef.current = { x: data.scroll.x, y: data.scroll.y };
         }
         if (Array.isArray(data.network)) {
           setNetwork(data.network);
