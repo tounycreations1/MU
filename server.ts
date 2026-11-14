@@ -197,7 +197,7 @@ async function startServer() {
   };
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, isProd, state: manager.getState() });
+    res.json({ ok: true, mode: 'chromium', isProd, state: manager.getState() });
   });
 
   app.get('/api/network/:id', (req, res) => {

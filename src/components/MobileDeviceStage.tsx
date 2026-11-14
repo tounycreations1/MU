@@ -9,14 +9,26 @@ import {
   Wifi,
 } from 'lucide-react';
 import { DEVICE_PRESETS } from '../data/devices.ts';
-import type { BrowserState, HighlightRect } from '../types/browser.ts';
+import type { ShadowDomBridge } from '../hooks/useBrowserSocket.ts';
+import type {
+  BrowserState,
+  EngineMode,
+  HighlightRect,
+  RenderedPageSnapshot,
+} from '../types/browser.ts';
+import {
+  buildShadowDomTree,
+  extractInspectedElement,
+} from '../utils/shadowDomInspector.ts';
 
 interface MobileDeviceStageProps {
+  engineMode: EngineMode;
   state: BrowserState;
   frameDataUrl: string | null;
+  renderedPage: RenderedPageSnapshot | null;
   highlightRect: HighlightRect | null;
   zoomMode: 'fit' | 'actual';
-  onNavigate: (url: string) => void;
+  onNavigate: (url: string, options?: { method?: string; formData?: string }) => void;
   onBack: () => void;
   onForward: () => void;
   onReload: () => void;
@@ -25,11 +37,14 @@ interface MobileDeviceStageProps {
   onKeyboard: (action: 'type' | 'key', text?: string, key?: string) => void;
   onInspectAt: (x: number, y: number, selectElement: boolean) => void;
   onElementPicked: () => void;
+  registerShadowBridge?: (bridge: ShadowDomBridge | null) => void;
 }
 
 export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
+  engineMode,
   state,
   frameDataUrl,
+  renderedPage,
   highlightRect,
   zoomMode,
   onNavigate,
@@ -41,6 +56,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   onKeyboard,
   onInspectAt,
   onElementPicked,
+  registerShadowBridge,
 }) => {
   const [addressInput, setAddressInput] = useState(state.url);
   const [addressFocused, setAddressFocused] = useState(false);
@@ -49,6 +65,9 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
 
   const stageContainerRef = useRef<HTMLDivElement | null>(null);
   const screenRef = useRef<HTMLDivElement | null>(null);
+  const shadowHostRef = useRef<HTMLDivElement | null>(null);
+  const shadowRootRef = useRef<ShadowRoot | null>(null);
+
   const dragRef = useRef<{
     active: boolean;
     startX: number;
@@ -62,6 +81,8 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   // Coalesce rapid wheel/drag deltas per animation frame so Chromium never lags
   const pendingWheelRef = useRef<{ x: number; y: number; dx: number; dy: number } | null>(null);
   const wheelRafRef = useRef<number | null>(null);
+
+  const isVercelMode = engineMode === 'vercel-proxy';
 
   const queueWheel = (x: number, y: number, dx: number, dy: number) => {
     if (pendingWheelRef.current) {
@@ -127,6 +148,188 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   const displayW = Math.round(state.viewportWidth * scale);
   const displayH = Math.round(state.viewportHeight * scale);
 
+  // Mount & update Shadow DOM content in Vercel Serverless Proxy Mode (Zero <iframe>)
+  useEffect(() => {
+    if (!isVercelMode || !shadowHostRef.current) return;
+
+    if (!shadowRootRef.current) {
+      shadowRootRef.current = shadowHostRef.current.attachShadow({ mode: 'open' });
+    }
+    const shadow = shadowRootRef.current;
+
+    if (!renderedPage) {
+      shadow.innerHTML = '';
+      return;
+    }
+
+    const baseResetCss = `
+      :host {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #ffffff;
+        color: #111827;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 14px;
+        line-height: 1.45;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-font-smoothing: antialiased;
+      }
+      .sv-doc { min-height: 100%; background: #ffffff; color: #111827; }
+      .sv-body { min-height: 100%; margin: 0; padding: 0; overflow-wrap: anywhere; }
+      .sv-body img, .sv-body video, .sv-body svg { max-width: 100%; height: auto; }
+      .sv-body a { cursor: pointer; }
+      ::-webkit-scrollbar { width: 5px; height: 5px; }
+      ::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.4); border-radius: 3px; }
+    `;
+
+    const styleTags = [
+      `<style data-sv-base="true">${baseResetCss}</style>`,
+      ...renderedPage.styles.map((css) => `<style>${css}</style>`),
+    ].join('\n');
+
+    shadow.innerHTML = `${styleTags}\n${renderedPage.htmlBody}`;
+    shadowHostRef.current.scrollTop = 0;
+
+    const handleClick = (event: Event) => {
+      const mouseEvent = event as MouseEvent;
+      if (state.inspectMode) return;
+
+      const path = mouseEvent.composedPath();
+      const anchor = path.find(
+        (node): node is HTMLAnchorElement =>
+          node instanceof HTMLElement && node.tagName === 'A',
+      );
+      if (!anchor) return;
+
+      const href = anchor.getAttribute('href') || '';
+      if (!href) return;
+
+      if (href.startsWith('#')) {
+        mouseEvent.preventDefault();
+        const targetId = href.slice(1);
+        if (targetId) {
+          const target = shadow.getElementById(targetId);
+          target?.scrollIntoView({ behavior: 'smooth' });
+        }
+        return;
+      }
+
+      if (/^https?:\/\//i.test(href)) {
+        mouseEvent.preventDefault();
+        onNavigate(href);
+      }
+    };
+
+    const handleSubmit = (event: Event) => {
+      const submitEvent = event as SubmitEvent;
+      submitEvent.preventDefault();
+      const form = submitEvent.target as HTMLFormElement | null;
+      if (!form) return;
+
+      const rawAction = form.getAttribute('action') || renderedPage.url;
+      let actionUrl = renderedPage.url;
+      try {
+        actionUrl = new URL(rawAction, renderedPage.url).toString();
+      } catch {
+        actionUrl = renderedPage.url;
+      }
+
+      const method = (form.getAttribute('method') || 'GET').toUpperCase();
+      const fd = new FormData(form);
+      const params = new URLSearchParams();
+      fd.forEach((val, key) => {
+        if (typeof val === 'string') params.append(key, val);
+      });
+
+      if (method === 'POST') {
+        onNavigate(actionUrl, { method: 'POST', formData: params.toString() });
+      } else {
+        const parsed = new URL(actionUrl);
+        params.forEach((v, k) => parsed.searchParams.set(k, v));
+        onNavigate(parsed.toString());
+      }
+    };
+
+    shadow.addEventListener('click', handleClick);
+    shadow.addEventListener('submit', handleSubmit);
+    return () => {
+      shadow.removeEventListener('click', handleClick);
+      shadow.removeEventListener('submit', handleSubmit);
+    };
+  }, [isVercelMode, onNavigate, renderedPage, state.inspectMode]);
+
+  // Register live Shadow DOM inspection & style editing bridge
+  useEffect(() => {
+    if (!registerShadowBridge) return;
+    if (!isVercelMode) {
+      registerShadowBridge(null);
+      return;
+    }
+
+    const bridge: ShadowDomBridge = {
+      getRootElement: () => shadowRootRef.current,
+      getDomTree: () => {
+        const root = shadowRootRef.current;
+        if (!root) return null;
+        const bodyEl = root.querySelector('.sv-body') || root.firstElementChild;
+        return buildShadowDomTree(bodyEl, root);
+      },
+      inspectAt: (viewportX, viewportY) => {
+        const root = shadowRootRef.current;
+        const screenEl = screenRef.current;
+        if (!root || !screenEl) return null;
+        const rect = screenEl.getBoundingClientRect();
+        const clientX = rect.left + viewportX * scale;
+        const clientY = rect.top + viewportY * scale;
+        const hit = root.elementFromPoint(clientX, clientY);
+        if (!hit || hit === shadowHostRef.current) return null;
+        return extractInspectedElement(hit, root, rect, scale);
+      },
+      inspectSelector: (selector) => {
+        const root = shadowRootRef.current;
+        const screenEl = screenRef.current;
+        if (!root || !screenEl || !selector) return null;
+        try {
+          const hit = root.querySelector(selector);
+          if (!hit) return null;
+          return extractInspectedElement(hit, root, screenEl.getBoundingClientRect(), scale);
+        } catch {
+          return null;
+        }
+      },
+      updateElementStyle: (selector, property, value) => {
+        const root = shadowRootRef.current;
+        const screenEl = screenRef.current;
+        if (!root || !screenEl || !selector) return null;
+        try {
+          const hit = root.querySelector(selector) as HTMLElement | null;
+          if (!hit) return null;
+          hit.style.setProperty(property, value);
+          return extractInspectedElement(hit, root, screenEl.getBoundingClientRect(), scale).element;
+        } catch {
+          return null;
+        }
+      },
+      exportHtmlSnapshot: () => {
+        const root = shadowRootRef.current;
+        if (!root) return;
+        const blob = new Blob([root.innerHTML], { type: 'text/html;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `stealthview-snapshot-${Date.now()}.html`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(link.href), 1500);
+      },
+    };
+
+    registerShadowBridge(bridge);
+    return () => registerShadowBridge(null);
+  }, [isVercelMode, registerShadowBridge, scale]);
+
   const mapToViewport = (clientX: number, clientY: number) => {
     const rect = screenRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
@@ -139,15 +342,20 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    screenRef.current?.focus();
+    if (!isVercelMode) {
+      screenRef.current?.focus();
+    }
     setScreenFocused(true);
 
     if (state.inspectMode) {
+      e.preventDefault();
       const pt = mapToViewport(e.clientX, e.clientY);
       onInspectAt(pt.x, pt.y, true);
       onElementPicked();
       return;
     }
+
+    if (isVercelMode) return;
 
     dragRef.current = {
       active: true,
@@ -170,7 +378,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       return;
     }
 
-    if (!dragRef.current.active) return;
+    if (isVercelMode || !dragRef.current.active) return;
     const totalDx = Math.abs(e.clientX - dragRef.current.startX);
     const totalDy = Math.abs(e.clientY - dragRef.current.startY);
     if (totalDx > 5 || totalDy > 5) {
@@ -187,7 +395,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (state.inspectMode) return;
+    if (state.inspectMode || isVercelMode) return;
     if (!dragRef.current.active) return;
     const wasMoved = dragRef.current.moved;
     dragRef.current.active = false;
@@ -198,12 +406,13 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    if (state.inspectMode) return;
+    if (state.inspectMode || isVercelMode) return;
     const pt = mapToViewport(e.clientX, e.clientY);
     queueWheel(pt.x, pt.y, e.deltaX, e.deltaY);
   };
 
   const handleScreenKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (isVercelMode) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key.length === 1) {
       e.preventDefault();
@@ -234,16 +443,18 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
           <button
             type="button"
             onClick={onBack}
+            disabled={!state.canGoBack}
             title="Back"
-            className="p-1.5 rounded-md text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            className="p-1.5 rounded-md text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-35 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
           </button>
           <button
             type="button"
             onClick={onForward}
+            disabled={!state.canGoForward}
             title="Forward"
-            className="p-1.5 rounded-md text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            className="p-1.5 rounded-md text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-35 transition-colors"
           >
             <ArrowRight className="w-4 h-4" />
           </button>
@@ -328,10 +539,35 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
             onKeyDown={handleScreenKeyDown}
             style={{ width: displayW, height: displayH }}
             className={`relative bg-white overflow-hidden outline-none ${
-              state.inspectMode ? 'cursor-crosshair' : 'cursor-pointer'
+              state.inspectMode ? 'cursor-crosshair' : isVercelMode ? 'cursor-default' : 'cursor-pointer'
             } ${screenFocused ? 'ring-1 ring-sky-500/60' : ''}`}
           >
-            {frameDataUrl ? (
+            {isVercelMode ? (
+              renderedPage ? (
+                <div
+                  style={{
+                    width: state.viewportWidth,
+                    height: state.viewportHeight,
+                    transform: `scale(${scale})`,
+                    transformOrigin: 'top left',
+                  }}
+                  className="bg-white overflow-hidden select-text"
+                >
+                  <div
+                    ref={shadowHostRef}
+                    className="w-full h-full overflow-y-auto overflow-x-hidden"
+                  />
+                </div>
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center bg-slate-950 text-slate-300 px-6 text-center gap-2">
+                  <RotateCw className="w-5 h-5 animate-spin text-sky-400" />
+                  <p className="text-xs font-medium">Fetching mobile viewport via proxy...</p>
+                  <p className="text-[11px] font-mono text-slate-500 tabular-nums">
+                    {state.proxy.server}
+                  </p>
+                </div>
+              )
+            ) : frameDataUrl ? (
               <img
                 src={frameDataUrl}
                 alt={`Mobile viewport rendering ${state.url}`}

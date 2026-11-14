@@ -166,3 +166,14 @@ export interface HighlightRect {
   height: number;
   label: string;
 }
+
+export type EngineMode = 'detecting' | 'chromium' | 'vercel-proxy' | 'backend-missing';
+
+export interface RenderedPageSnapshot {
+  url: string;
+  title: string;
+  htmlBody: string;
+  styles: string[];
+  renderedAt: number;
+}
+

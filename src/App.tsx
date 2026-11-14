@@ -13,12 +13,14 @@ export default function App() {
   const [zoomMode, setZoomMode] = useState<'fit' | 'actual'>('fit');
 
   const {
+    engineMode,
     wsStatus,
     backendUrl,
     setBackendUrl,
     socketError,
     state,
     frameDataUrl,
+    renderedPage,
     network,
     consoleLogs,
     domTree,
@@ -27,6 +29,7 @@ export default function App() {
     storage,
     send,
     fetchNetworkDetail,
+    registerShadowBridge,
   } = useBrowserSocket();
 
   const [backendInput, setBackendInput] = useState(backendUrl);
@@ -135,13 +138,12 @@ export default function App() {
       </header>
 
       {/* Static Deployment / Missing Backend Notice */}
-      {wsStatus === 'backend-missing' && (
+      {engineMode === 'backend-missing' && wsStatus === 'backend-missing' && (
         <div className="px-5 py-2.5 bg-red-500/10 border-b border-red-500/20 flex items-center justify-between gap-4 flex-wrap text-xs text-red-700 dark:text-red-300 shrink-0">
           <div className="min-w-0">
-            <span className="font-semibold">Headless browser backend not detected at this origin.</span>{' '}
+            <span className="font-semibold">Browser API not reachable at this origin.</span>{' '}
             <span>
-              Static hosts (like Vercel) only serve <code className="font-mono">dist/</code> and do not run{' '}
-              <code className="font-mono">server.ts</code> / Chromium. Run <code className="font-mono">npm run build &amp;&amp; npm start</code> on a Node/Docker host (Cloud Run, Railway, Render, Fly.io) or connect your backend URL:
+              Run <code className="font-mono">npm run build &amp;&amp; npm start</code> or enter your backend URL:
             </span>
           </div>
           <form
@@ -198,11 +200,13 @@ export default function App() {
       >
         {layoutMode !== 'devtools' && (
           <MobileDeviceStage
+            engineMode={engineMode}
             state={state}
             frameDataUrl={frameDataUrl}
+            renderedPage={renderedPage}
             highlightRect={highlightRect}
             zoomMode={zoomMode}
-            onNavigate={(url) => send({ type: 'navigate', url })}
+            onNavigate={(url, opts) => send({ type: 'navigate', url, ...opts })}
             onBack={() => send({ type: 'back' })}
             onForward={() => send({ type: 'forward' })}
             onReload={() => send({ type: 'reload' })}
@@ -217,6 +221,7 @@ export default function App() {
               if (layoutMode === 'device') setLayoutMode('split');
               send({ type: 'setInspectMode', enabled: false });
             }}
+            registerShadowBridge={registerShadowBridge}
           />
         )}
 
