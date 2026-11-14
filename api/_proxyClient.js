@@ -1,16 +1,15 @@
 import http from 'node:http';
 import https from 'node:https';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import tls from 'node:tls';
 import zlib from 'node:zlib';
 
-export function applyCorsHeaders(res: ServerResponse): void {
+export function applyCorsHeaders(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-export function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+export function sendJson(res, status, payload) {
   applyCorsHeaders(res);
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -18,23 +17,7 @@ export function sendJson(res: ServerResponse, status: number, payload: unknown):
   res.end(JSON.stringify(payload));
 }
 
-export interface ProxyTargetConfig {
-  enabled: boolean;
-  server: string;
-  username?: string;
-  password?: string;
-}
-
-export interface ProxyPresetEntry {
-  id: string;
-  label: string;
-  locationHint: string;
-  server: string;
-  username: string;
-  password: string;
-}
-
-export const VERCEL_PROXY_PRESETS: ProxyPresetEntry[] = [
+export const VERCEL_PROXY_PRESETS = [
   {
     id: 'us-east-nj',
     label: 'US East · Piscataway, NJ',
@@ -53,14 +36,11 @@ export const VERCEL_PROXY_PRESETS: ProxyPresetEntry[] = [
   },
 ];
 
-export function resolveProxyConfig(
-  proxyId?: string,
-  custom?: Partial<ProxyTargetConfig>,
-): ProxyTargetConfig {
-  if (proxyId === 'direct' || custom?.enabled === false) {
+export function resolveProxyConfig(proxyId, custom) {
+  if (proxyId === 'direct' || (custom && custom.enabled === false)) {
     return { enabled: false, server: '' };
   }
-  if (custom?.server) {
+  if (custom && custom.server) {
     const matched = VERCEL_PROXY_PRESETS.find(
       (p) => p.server === custom.server && p.username === custom.username,
     );
@@ -84,16 +64,7 @@ export function resolveProxyConfig(
   };
 }
 
-export interface ProxyFetchResult {
-  status: number;
-  statusText: string;
-  finalUrl: string;
-  headers: Record<string, string>;
-  setCookies: string[];
-  body: Buffer;
-}
-
-function decodeBody(raw: Buffer, encoding?: string): Buffer {
+function decodeBody(raw, encoding) {
   const enc = (encoding || '').toLowerCase();
   try {
     if (enc.includes('gzip')) return zlib.gunzipSync(raw);
@@ -105,16 +76,10 @@ function decodeBody(raw: Buffer, encoding?: string): Buffer {
   return raw;
 }
 
-function openConnectTunnel(
-  proxyUrl: URL,
-  targetHost: string,
-  targetPort: number,
-  authHeader: string | undefined,
-  timeoutMs: number,
-): Promise<tls.TLSSocket | import('node:net').Socket> {
+function openConnectTunnel(proxyUrl, targetHost, targetPort, authHeader, timeoutMs) {
   return new Promise((resolve, reject) => {
     const proxyPort = Number(proxyUrl.port) || 80;
-    const headers: Record<string, string> = {
+    const headers = {
       Host: `${targetHost}:${targetPort}`,
     };
     if (authHeader) {
@@ -147,24 +112,42 @@ function openConnectTunnel(
   });
 }
 
-async function singleProxyRequest(
-  targetUrl: string,
-  proxy: ProxyTargetConfig,
-  options: {
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string | Buffer;
-    timeoutMs?: number;
-    userAgent?: string;
-  },
-): Promise<ProxyFetchResult> {
+function collectResponse(res, finalUrl, resolve, reject) {
+  const chunks = [];
+  res.on('data', (chunk) => chunks.push(chunk));
+  res.on('end', () => {
+    const raw = Buffer.concat(chunks);
+    const headers = {};
+    for (const [k, v] of Object.entries(res.headers)) {
+      if (v === undefined) continue;
+      headers[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : v;
+    }
+    const setCookies = Array.isArray(res.headers['set-cookie'])
+      ? res.headers['set-cookie']
+      : res.headers['set-cookie']
+        ? [res.headers['set-cookie']]
+        : [];
+    const body = decodeBody(raw, headers['content-encoding']);
+    resolve({
+      status: res.statusCode || 200,
+      statusText: res.statusMessage || 'OK',
+      finalUrl,
+      headers,
+      setCookies,
+      body,
+    });
+  });
+  res.on('error', reject);
+}
+
+async function singleProxyRequest(targetUrl, proxy, options = {}) {
   const urlObj = new URL(targetUrl);
   const isHttps = urlObj.protocol === 'https:';
   const targetPort = Number(urlObj.port) || (isHttps ? 443 : 80);
   const timeoutMs = options.timeoutMs ?? 12000;
   const method = (options.method || 'GET').toUpperCase();
 
-  const reqHeaders: Record<string, string> = {
+  const reqHeaders = {
     'User-Agent':
       options.userAgent ||
       'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
@@ -206,7 +189,7 @@ async function singleProxyRequest(
       : undefined;
 
   if (!isHttps) {
-    const headersWithAuth: Record<string, string> = { ...reqHeaders, Host: urlObj.host };
+    const headersWithAuth = { ...reqHeaders, Host: urlObj.host };
     if (authHeader) headersWithAuth['Proxy-Authorization'] = authHeader;
 
     return new Promise((resolve, reject) => {
@@ -238,7 +221,7 @@ async function singleProxyRequest(
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    const fail = (err: Error) => {
+    const fail = (err) => {
       if (settled) return;
       settled = true;
       reject(err);
@@ -284,51 +267,7 @@ async function singleProxyRequest(
   });
 }
 
-function collectResponse(
-  res: IncomingMessage,
-  finalUrl: string,
-  resolve: (val: ProxyFetchResult) => void,
-  reject: (err: Error) => void,
-) {
-  const chunks: Buffer[] = [];
-  res.on('data', (chunk: Buffer) => chunks.push(chunk));
-  res.on('end', () => {
-    const raw = Buffer.concat(chunks);
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(res.headers)) {
-      if (v === undefined) continue;
-      headers[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : v;
-    }
-    const setCookies = Array.isArray(res.headers['set-cookie'])
-      ? res.headers['set-cookie']
-      : res.headers['set-cookie']
-        ? [res.headers['set-cookie']]
-        : [];
-    const body = decodeBody(raw, headers['content-encoding']);
-    resolve({
-      status: res.statusCode || 200,
-      statusText: res.statusMessage || 'OK',
-      finalUrl,
-      headers,
-      setCookies,
-      body,
-    });
-  });
-  res.on('error', reject);
-}
-
-export async function proxyFetch(
-  targetUrl: string,
-  proxy: ProxyTargetConfig,
-  options: {
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string | Buffer;
-    timeoutMs?: number;
-    maxRedirects?: number;
-    userAgent?: string;
-  } = {},
-): Promise<ProxyFetchResult> {
+export async function proxyFetch(targetUrl, proxy, options = {}) {
   let currentUrl = targetUrl;
   let method = options.method || 'GET';
   let body = options.body;
@@ -348,7 +287,10 @@ export async function proxyFetch(
       i < maxRedirects
     ) {
       currentUrl = new URL(loc, currentUrl).toString();
-      if (result.status === 303 || ((result.status === 301 || result.status === 302) && method === 'POST')) {
+      if (
+        result.status === 303 ||
+        ((result.status === 301 || result.status === 302) && method === 'POST')
+      ) {
         method = 'GET';
         body = undefined;
       }
@@ -360,19 +302,18 @@ export async function proxyFetch(
   throw new Error('Too many redirects');
 }
 
-export async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const anyReq = req as IncomingMessage & { body?: unknown };
-  if (anyReq.body && typeof anyReq.body === 'object') {
-    return anyReq.body as Record<string, unknown>;
+export async function readJsonBody(req) {
+  if (req.body && typeof req.body === 'object') {
+    return req.body;
   }
-  const chunks: Buffer[] = [];
+  const chunks = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   const text = Buffer.concat(chunks).toString('utf8').trim();
   if (!text) return {};
   try {
-    return JSON.parse(text) as Record<string, unknown>;
+    return JSON.parse(text);
   } catch {
     return {};
   }

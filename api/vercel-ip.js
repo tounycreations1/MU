@@ -1,14 +1,12 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   applyCorsHeaders,
   proxyFetch,
   readJsonBody,
   resolveProxyConfig,
   sendJson,
-  type ProxyTargetConfig,
-} from './_proxyClient';
+} from './_proxyClient.js';
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
+export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     applyCorsHeaders(res);
     res.statusCode = 204;
@@ -19,13 +17,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   try {
     const reqUrl = new URL(req.url || '/', 'http://localhost');
     let proxyId = reqUrl.searchParams.get('proxyId') || undefined;
-    let customProxy: Partial<ProxyTargetConfig> | undefined;
+    let customProxy;
 
     if (req.method === 'POST') {
       const body = await readJsonBody(req);
       if (typeof body.proxyId === 'string') proxyId = body.proxyId;
       if (body.proxy && typeof body.proxy === 'object') {
-        customProxy = body.proxy as Partial<ProxyTargetConfig>;
+        customProxy = body.proxy;
       }
     }
 
@@ -41,19 +39,19 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       // fallback to geo lookup
     }
 
-    let geo: Record<string, unknown> = {};
+    let geo = {};
     try {
       const geoTarget = ip ? `https://ipwho.is/${encodeURIComponent(ip)}` : 'https://ipwho.is/';
       const geoRes = await proxyFetch(geoTarget, proxy, { timeoutMs: 8000 });
       if (geoRes.status >= 200 && geoRes.status < 300) {
-        geo = JSON.parse(geoRes.body.toString('utf8')) as Record<string, unknown>;
+        geo = JSON.parse(geoRes.body.toString('utf8'));
       }
     } catch {
       // ignore geo error
     }
 
-    const conn = (geo.connection as Record<string, unknown> | undefined) || undefined;
-    const tz = (geo.timezone as Record<string, unknown> | undefined) || undefined;
+    const conn = geo.connection && typeof geo.connection === 'object' ? geo.connection : undefined;
+    const tz = geo.timezone && typeof geo.timezone === 'object' ? geo.timezone : undefined;
 
     sendJson(res, 200, {
       ok: true,

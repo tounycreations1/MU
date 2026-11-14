@@ -572,15 +572,24 @@ export function useBrowserSocket() {
   const checkHealthMode = useCallback(
     async (base: string): Promise<'chromium' | 'vercel-proxy' | 'missing'> => {
       try {
-        const res = await fetch(`${base}/api/health`, { method: 'GET' });
+        const res = await fetch(`${base}/api/health`, {
+          method: 'GET',
+          cache: 'no-store',
+        });
         const contentType = res.headers.get('content-type') || '';
         if (!res.ok || !contentType.includes('application/json')) {
+          setSocketError(`/api/health returned HTTP ${res.status} (${contentType || 'unknown'})`);
           return 'missing';
         }
         const data = (await res.json()) as { ok?: boolean; mode?: string };
-        if (!data || !data.ok) return 'missing';
+        if (!data || !data.ok) {
+          setSocketError('/api/health returned ok: false');
+          return 'missing';
+        }
+        setSocketError(null);
         return data.mode === 'vercel-proxy' ? 'vercel-proxy' : 'chromium';
-      } catch {
+      } catch (err) {
+        setSocketError(err instanceof Error ? err.message : 'Unable to reach /api/health');
         return 'missing';
       }
     },

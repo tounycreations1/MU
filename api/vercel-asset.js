@@ -1,16 +1,10 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   applyCorsHeaders,
   proxyFetch,
   resolveProxyConfig,
-  type ProxyTargetConfig,
-} from './_proxyClient';
+} from './_proxyClient.js';
 
-function buildAssetUrl(
-  target: string,
-  proxyId: string,
-  customToken: string,
-): string {
+function buildAssetUrl(target, proxyId, customToken) {
   const params = new URLSearchParams();
   params.set('url', target);
   if (proxyId) params.set('proxyId', proxyId);
@@ -18,13 +12,8 @@ function buildAssetUrl(
   return `/api/vercel-asset?${params.toString()}`;
 }
 
-function rewriteCssUrls(
-  cssText: string,
-  baseUrl: string,
-  proxyId: string,
-  customToken: string,
-): string {
-  return cssText.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_m, _q, rawRef: string) => {
+function rewriteCssUrls(cssText, baseUrl, proxyId, customToken) {
+  return cssText.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_m, _q, rawRef) => {
     const trimmed = rawRef.trim();
     if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('#')) {
       return `url("${trimmed}")`;
@@ -38,7 +27,7 @@ function rewriteCssUrls(
   });
 }
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
+export default async function handler(req, res) {
   applyCorsHeaders(res);
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
@@ -57,12 +46,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     const proxyId = reqUrl.searchParams.get('proxyId') || '';
     const customToken = reqUrl.searchParams.get('p') || '';
-    let customProxy: Partial<ProxyTargetConfig> | undefined;
+    let customProxy;
     if (customToken) {
       try {
-        customProxy = JSON.parse(
-          Buffer.from(customToken, 'base64url').toString('utf8'),
-        ) as Partial<ProxyTargetConfig>;
+        customProxy = JSON.parse(Buffer.from(customToken, 'base64url').toString('utf8'));
       } catch {
         // ignore invalid token
       }

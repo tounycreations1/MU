@@ -1,12 +1,10 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   applyCorsHeaders,
   proxyFetch,
   readJsonBody,
   resolveProxyConfig,
   sendJson,
-  type ProxyTargetConfig,
-} from './_proxyClient';
+} from './_proxyClient.js';
 
 const TRACKER_HOSTS = [
   'doubleclick.net',
@@ -28,12 +26,12 @@ const TRACKER_HOSTS = [
   'adservice.google.com',
 ];
 
-function isTrackerHost(urlStr: string): boolean {
+function isTrackerHost(urlStr) {
   const lower = urlStr.toLowerCase();
   return TRACKER_HOSTS.some((h) => lower.includes(h));
 }
 
-function escapeHtml(text: string): string {
+function escapeHtml(text) {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -41,7 +39,7 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function normalizeUrl(raw: string): string {
+function normalizeUrl(raw) {
   const trimmed = raw.trim();
   if (!trimmed) return 'https://ipv4.webshare.io/';
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
@@ -51,11 +49,7 @@ function normalizeUrl(raw: string): string {
   return `https://duckduckgo.com/?q=${encodeURIComponent(trimmed)}`;
 }
 
-function makeAssetProxyUrl(
-  absUrl: string,
-  proxyId: string,
-  customToken: string,
-): string {
+function makeAssetProxyUrl(absUrl, proxyId, customToken) {
   const params = new URLSearchParams();
   params.set('url', absUrl);
   if (proxyId) params.set('proxyId', proxyId);
@@ -63,7 +57,7 @@ function makeAssetProxyUrl(
   return `/api/vercel-asset?${params.toString()}`;
 }
 
-function resolveAbsUrl(rawRef: string, baseUrl: string): string {
+function resolveAbsUrl(rawRef, baseUrl) {
   const trimmed = rawRef.trim();
   if (
     !trimmed ||
@@ -83,14 +77,8 @@ function resolveAbsUrl(rawRef: string, baseUrl: string): string {
   }
 }
 
-function rewriteCssForShadowDom(
-  cssText: string,
-  cssBaseUrl: string,
-  proxyId: string,
-  customToken: string,
-): string {
-  // Rewrite url(...) asset references
-  let out = cssText.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_m, _q, rawRef: string) => {
+function rewriteCssForShadowDom(cssText, cssBaseUrl, proxyId, customToken) {
+  let out = cssText.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_m, _q, rawRef) => {
     const trimmed = rawRef.trim();
     if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('#')) {
       return `url("${trimmed}")`;
@@ -100,30 +88,30 @@ function rewriteCssForShadowDom(
     return `url("${makeAssetProxyUrl(abs, proxyId, customToken)}")`;
   });
 
-  // Scope html / body / :root selectors cleanly to Shadow DOM wrappers
   out = out.replace(/(^|[},;]\s*):root\b/gi, '$1:host');
   out = out.replace(/(^|[},;]\s*)html\b(?=[\s.{:#\[,>~+]|$)/gi, '$1.sv-doc');
   out = out.replace(/(^|[},;]\s*)body\b(?=[\s.{:#\[,>~+]|$)/gi, '$1.sv-body');
-  // Strip @import rules after stripping unsafe external scripts
   out = out.replace(/@import\s+[^;]+;/gi, '');
   return out;
 }
 
-function extractTitle(html: string, fallbackUrl: string): string {
+function extractTitle(html, fallbackUrl) {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   if (!match) return fallbackUrl;
-  return match[1]
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/\s+/g, ' ')
-    .trim() || fallbackUrl;
+  return (
+    match[1]
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim() || fallbackUrl
+  );
 }
 
-function extractMetaRefreshUrl(html: string, baseUrl: string): string | null {
+function extractMetaRefreshUrl(html, baseUrl) {
   const match = html.match(
     /<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=([^"'\s;>]+)/i,
   );
@@ -132,27 +120,14 @@ function extractMetaRefreshUrl(html: string, baseUrl: string): string | null {
   return /^https?:\/\//i.test(resolved) ? resolved : null;
 }
 
-function sanitizeAndRewriteHtml(
-  rawHtml: string,
-  baseUrl: string,
-  proxyId: string,
-  customToken: string,
-  blockTrackers: boolean,
-): {
-  title: string;
-  bodyHtml: string;
-  inlineStyles: string[];
-  stylesheetUrls: string[];
-  blockedCount: number;
-} {
+function sanitizeAndRewriteHtml(rawHtml, baseUrl, proxyId, customToken, blockTrackers) {
   let blockedCount = 0;
   const title = extractTitle(rawHtml, baseUrl);
-  const inlineStyles: string[] = [];
-  const stylesheetUrls: string[] = [];
+  const inlineStyles = [];
+  const stylesheetUrls = [];
 
-  // Extract external stylesheets
   const linkRegex = /<link\b[^>]*>/gi;
-  let linkMatch: RegExpExecArray | null;
+  let linkMatch;
   while ((linkMatch = linkRegex.exec(rawHtml)) !== null) {
     const tag = linkMatch[0];
     if (!/\brel\s*=\s*["']?[^"'>]*stylesheet/i.test(tag)) continue;
@@ -169,21 +144,18 @@ function sanitizeAndRewriteHtml(
     }
   }
 
-  // Extract inline <style> blocks
   const styleRegex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
-  let styleMatch: RegExpExecArray | null;
+  let styleMatch;
   while ((styleMatch = styleRegex.exec(rawHtml)) !== null) {
     if (styleMatch[1].trim()) {
       inlineStyles.push(rewriteCssForShadowDom(styleMatch[1], baseUrl, proxyId, customToken));
     }
   }
 
-  // Extract <body> inner HTML if present
   const bodyMatch = rawHtml.match(/<body\b([^>]*)>([\s\S]*?)<\/body>/i);
   const bodyAttrs = bodyMatch?.[1] || '';
   let content = bodyMatch ? bodyMatch[2] : rawHtml;
 
-  // Strip scripts, iframes, frames, embeds, meta, head tags
   content = content
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
@@ -197,42 +169,34 @@ function sanitizeAndRewriteHtml(
     .replace(/<meta\b[^>]*\/?>/gi, '')
     .replace(/<base\b[^>]*\/?>/gi, '');
 
-  // Unwrap <noscript> so fallback images/UI become visible
   content = content.replace(/<\/?noscript\b[^>]*>/gi, '');
-
-  // Strip inline JS event handlers (onclick, onload, onerror, etc.)
   content = content.replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-  // Neutralize javascript: URLs
-  content = content.replace(
-    /\b(href|action)\s*=\s*(["'])javascript:[^"']*\2/gi,
-    '$1="#"',
-  );
+  content = content.replace(/\b(href|action)\s*=\s*(["'])javascript:[^"']*\2/gi, '$1="#"');
 
-  // Rewrite href and action attributes to absolute URLs
   content = content.replace(
     /\b(href|action)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
-    (_m, attr: string, dq: string | undefined, sq: string | undefined) => {
+    (_m, attr, dq, sq) => {
       const val = dq ?? sq ?? '';
       const abs = resolveAbsUrl(val, baseUrl);
       return `${attr}="${escapeHtml(abs)}"`;
     },
   );
 
-  // Promote data-src to src when src is missing or data:image
-  content = content.replace(/<img\b([^>]*)>/gi, (fullTag, attrs: string) => {
+  content = content.replace(/<img\b([^>]*)>/gi, (fullTag, attrs) => {
     const hasRealSrc = /\bsrc\s*=\s*(?:"(?!data:)[^"]+"|'(?!data:)[^']+')/i.test(attrs);
     if (hasRealSrc) return fullTag;
-    const dataSrcMatch = attrs.match(/\bdata-(?:src|lazy-src|original)\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    const dataSrcMatch = attrs.match(
+      /\bdata-(?:src|lazy-src|original)\s*=\s*(?:"([^"]*)"|'([^']*)')/i,
+    );
     const fallbackSrc = dataSrcMatch?.[1] || dataSrcMatch?.[2];
     if (!fallbackSrc) return fullTag;
     const cleaned = attrs.replace(/\bsrc\s*=\s*(?:"[^"]*"|'[^']*')/i, '');
     return `<img${cleaned} src="${escapeHtml(fallbackSrc)}">`;
   });
 
-  // Rewrite src / poster attributes on media elements via /api/vercel-asset
   content = content.replace(
     /\b(src|poster)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
-    (full, attr: string, dq: string | undefined, sq: string | undefined) => {
+    (full, attr, dq, sq) => {
       const rawVal = dq ?? sq ?? '';
       if (!rawVal || rawVal.startsWith('data:') || rawVal.startsWith('blob:')) {
         return full;
@@ -247,10 +211,9 @@ function sanitizeAndRewriteHtml(
     },
   );
 
-  // Rewrite srcset URLs via /api/vercel-asset
   content = content.replace(
     /\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
-    (_m, dq: string | undefined, sq: string | undefined) => {
+    (_m, dq, sq) => {
       const val = dq ?? sq ?? '';
       const rewritten = val
         .split(',')
@@ -269,12 +232,11 @@ function sanitizeAndRewriteHtml(
     },
   );
 
-  // Rewrite inline style="...url(...)..."
   content = content.replace(
     /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
-    (_m, dq: string | undefined, sq: string | undefined) => {
+    (_m, dq, sq) => {
       const val = dq ?? sq ?? '';
-      const rewritten = val.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_u, _q, ref: string) => {
+      const rewritten = val.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_u, _q, ref) => {
         const trimmed = ref.trim();
         if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
           return `url('${trimmed}')`;
@@ -299,7 +261,7 @@ function sanitizeAndRewriteHtml(
   };
 }
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
+export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     applyCorsHeaders(res);
     res.statusCode = 204;
@@ -320,16 +282,14 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const blockTrackers = body.blockTrackers !== false;
     const proxyId = typeof body.proxyId === 'string' ? body.proxyId : '';
     const customProxy =
-      body.proxy && typeof body.proxy === 'object'
-        ? (body.proxy as Partial<ProxyTargetConfig>)
-        : undefined;
+      body.proxy && typeof body.proxy === 'object' ? body.proxy : undefined;
 
     const customToken = customProxy
       ? Buffer.from(JSON.stringify(customProxy), 'utf8').toString('base64url')
       : '';
     const proxy = resolveProxyConfig(proxyId || undefined, customProxy);
 
-    const requestHeaders: Record<string, string> = {};
+    const requestHeaders = {};
     if (cookieHeader) {
       requestHeaders.Cookie = cookieHeader;
     }
@@ -346,7 +306,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       timeoutMs: 11000,
     });
 
-    // Follow one meta-refresh redirect if present
     const ctFirst = (fetched.headers['content-type'] || '').toLowerCase();
     if (ctFirst.includes('text/html')) {
       const htmlFirst = fetched.body.toString('utf8');
@@ -374,7 +333,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         blockTrackers,
       );
 
-      // Fetch up to 6 external stylesheets in parallel for full visual fidelity inside Shadow DOM
       const fetchedStyles = await Promise.all(
         parsed.stylesheetUrls.slice(0, 6).map(async (cssUrl) => {
           try {
@@ -397,15 +355,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
               };
             }
           } catch {
-            // skip slow/unreachable CSS
+            // skip slow CSS
           }
           return null;
         }),
       );
 
-      const externalCssList = fetchedStyles.filter(
-        (s): s is NonNullable<typeof s> => s !== null,
-      );
+      const externalCssList = fetchedStyles.filter((s) => s !== null);
 
       sendJson(res, 200, {
         ok: true,
@@ -415,10 +371,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         title: parsed.title,
         contentType,
         htmlBody: parsed.bodyHtml,
-        styles: [
-          ...externalCssList.map((s) => s.css),
-          ...parsed.inlineStyles,
-        ],
+        styles: [...externalCssList.map((s) => s.css), ...parsed.inlineStyles],
         stylesheetAssets: externalCssList.map((s) => ({
           url: s.url,
           status: s.status,
@@ -456,7 +409,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return;
     }
 
-    // Plain text / JSON response (e.g. https://ipv4.webshare.io/ returning exit IP)
     let displayText = rawText;
     if (contentType.includes('application/json')) {
       try {

@@ -1,7 +1,6 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { applyCorsHeaders, sendJson } from './_proxyClient';
+import { applyCorsHeaders, sendJson } from './_proxyClient.js';
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
+export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     applyCorsHeaders(res);
     res.statusCode = 204;

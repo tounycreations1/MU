@@ -143,6 +143,7 @@ export default function App() {
           <div className="min-w-0">
             <span className="font-semibold">Browser API not reachable at this origin.</span>{' '}
             <span>
+              {socketError ? `(${socketError}) ` : ''}
               Run <code className="font-mono">npm run build &amp;&amp; npm start</code> or enter your backend URL:
             </span>
           </div>
@@ -166,6 +167,13 @@ export default function App() {
               className="h-7 px-3 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded transition-colors whitespace-nowrap shrink-0"
             >
               Connect
+            </button>
+            <button
+              type="button"
+              onClick={() => setBackendUrl('')}
+              className="h-7 px-2.5 text-xs font-medium border border-red-500/30 hover:bg-red-500/10 rounded transition-colors whitespace-nowrap shrink-0"
+            >
+              Retry
             </button>
           </form>
         </div>
