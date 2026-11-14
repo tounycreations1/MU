@@ -37,6 +37,7 @@ interface MobileDeviceStageProps {
   onKeyboard: (action: 'type' | 'key', text?: string, key?: string) => void;
   onInspectAt: (x: number, y: number, selectElement: boolean) => void;
   onElementPicked: () => void;
+  onClientNotice?: (message: string) => void;
   registerShadowBridge?: (bridge: ShadowDomBridge | null) => void;
 }
 
@@ -56,6 +57,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   onKeyboard,
   onInspectAt,
   onElementPicked,
+  onClientNotice,
   registerShadowBridge,
 }) => {
   const [addressInput, setAddressInput] = useState(state.url);
@@ -89,6 +91,8 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
   onBackRef.current = onBack;
   const onForwardRef = useRef(onForward);
   onForwardRef.current = onForward;
+  const onClientNoticeRef = useRef(onClientNotice);
+  onClientNoticeRef.current = onClientNotice;
   const inspectModeRef = useRef(state.inspectMode);
   inspectModeRef.current = state.inspectMode;
 
@@ -232,6 +236,18 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       fd.forEach((val, key) => {
         if (typeof val === 'string') params.append(key, val);
       });
+
+      const hasActionAttr = Boolean(submitter?.getAttribute('formaction') || form.getAttribute('action'));
+      const hasInputValue = Array.from(
+        form.querySelectorAll('input:not([type="hidden"]), textarea, select'),
+      ).some((el) => Boolean((el as HTMLInputElement).value?.trim()));
+
+      if (!hasActionAttr && Array.from(params.keys()).length === 0 && hasInputValue) {
+        onClientNoticeRef.current?.(
+          'This site uses a client-side JavaScript form (Next.js/React). Connect a Node/Chromium backend (server.ts) for full JS app logins.',
+        );
+        return;
+      }
 
       if (method === 'POST') {
         onNavigateRef.current(actionUrl, { method: 'POST', formData: params.toString() });
@@ -495,9 +511,31 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       submitFormElement(form, submitEvent.submitter as HTMLElement | null);
     };
 
+    const handleInputUnlock = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      const form = target?.closest('form');
+      if (!form) return;
+      const hasText = Array.from(
+        form.querySelectorAll('input:not([type="hidden"]), textarea, select'),
+      ).some((el) => Boolean((el as HTMLInputElement).value?.trim()));
+      form
+        .querySelectorAll('button[type="submit"], button:not([type]), input[type="submit"]')
+        .forEach((btn) => {
+          const b = btn as HTMLButtonElement | HTMLInputElement;
+          if (hasText) {
+            b.removeAttribute('disabled');
+            b.disabled = false;
+          }
+        });
+    };
+
+    shadow.addEventListener('input', handleInputUnlock);
+    shadow.addEventListener('change', handleInputUnlock);
     shadow.addEventListener('click', handleClick);
     shadow.addEventListener('submit', handleSubmit);
     return () => {
+      shadow.removeEventListener('input', handleInputUnlock);
+      shadow.removeEventListener('change', handleInputUnlock);
       shadow.removeEventListener('click', handleClick);
       shadow.removeEventListener('submit', handleSubmit);
     };

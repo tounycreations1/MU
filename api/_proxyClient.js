@@ -275,14 +275,51 @@ export async function proxyFetch(targetUrl, proxy, options = {}) {
   let currentUrl = targetUrl;
   let method = options.method || 'GET';
   let body = options.body;
-  const maxRedirects = options.maxRedirects ?? 5;
+  const maxRedirects = options.maxRedirects ?? 10;
+
+  const cookieMap = new Map();
+  const initialCookie = options.headers?.Cookie || options.headers?.cookie || '';
+  if (initialCookie) {
+    for (const part of initialCookie.split(';')) {
+      const idx = part.indexOf('=');
+      if (idx > 0) {
+        cookieMap.set(part.slice(0, idx).trim(), part.slice(idx + 1).trim());
+      }
+    }
+  }
+  const allSetCookies = [];
 
   for (let i = 0; i <= maxRedirects; i++) {
+    const headers = { ...(options.headers || {}) };
+    if (cookieMap.size > 0) {
+      headers.Cookie = Array.from(cookieMap.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join('; ');
+    }
+
     const result = await singleProxyRequest(currentUrl, proxy, {
       ...options,
+      headers,
       method,
       body,
     });
+
+    if (result.setCookies.length > 0) {
+      allSetCookies.push(...result.setCookies);
+      for (const sc of result.setCookies) {
+        const first = sc.split(';')[0];
+        const eqIdx = first?.indexOf('=') ?? -1;
+        if (eqIdx > 0) {
+          const name = first.slice(0, eqIdx).trim();
+          const val = first.slice(eqIdx + 1).trim();
+          if (val === '' || /Max-Age=0/i.test(sc)) {
+            cookieMap.delete(name);
+          } else {
+            cookieMap.set(name, val);
+          }
+        }
+      }
+    }
 
     const loc = result.headers['location'];
     if (
@@ -300,7 +337,7 @@ export async function proxyFetch(targetUrl, proxy, options = {}) {
       }
       continue;
     }
-    return { ...result, finalUrl: currentUrl };
+    return { ...result, setCookies: allSetCookies, finalUrl: currentUrl };
   }
 
   throw new Error('Too many redirects');

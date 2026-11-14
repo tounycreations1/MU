@@ -229,6 +229,7 @@ export default function App() {
               if (layoutMode === 'device') setLayoutMode('split');
               send({ type: 'setInspectMode', enabled: false });
             }}
+            onClientNotice={(message) => send({ type: 'clientNotice', message })}
             registerShadowBridge={registerShadowBridge}
           />
         )}

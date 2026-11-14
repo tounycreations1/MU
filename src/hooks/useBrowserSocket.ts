@@ -1098,6 +1098,14 @@ export function useBrowserSocket() {
         case 'takeScreenshot':
           shadowBridgeRef.current?.exportHtmlSnapshot();
           break;
+        case 'clientNotice': {
+          const message = String(payload.message || '');
+          if (message) {
+            setState((prev) => ({ ...prev, lastError: message }));
+            pushConsoleLog('warn', message, stateRef.current.url);
+          }
+          break;
+        }
         default:
           break;
       }
