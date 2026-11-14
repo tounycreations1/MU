@@ -174,12 +174,16 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
         line-height: 1.45;
         overflow-y: auto;
         overflow-x: hidden;
+        box-sizing: border-box;
         -webkit-font-smoothing: antialiased;
       }
-      .sv-doc { min-height: 100%; background: #ffffff; color: #111827; }
-      .sv-body { min-height: 100%; margin: 0; padding: 0; overflow-wrap: anywhere; }
-      .sv-body img, .sv-body video, .sv-body svg { max-width: 100%; height: auto; }
+      *, *::before, *::after { box-sizing: border-box; }
+      .sv-doc { min-height: 100%; width: 100%; max-width: 100%; background: #ffffff; color: #111827; overflow-x: hidden; }
+      .sv-body { min-height: 100%; width: 100%; max-width: 100%; margin: 0; overflow-wrap: anywhere; overflow-x: hidden; overflow-y: visible !important; height: auto !important; }
+      .sv-body img, .sv-body video { max-width: 100%; height: auto; }
+      .sv-body svg { max-width: 100%; }
       .sv-body a { cursor: pointer; }
+      .content-collapsible-block { display: block !important; }
       ::-webkit-scrollbar { width: 5px; height: 5px; }
       ::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.4); border-radius: 3px; }
     `;
@@ -190,7 +194,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
     ].join('\n');
 
     shadow.innerHTML = `${styleTags}\n${renderedPage.htmlBody}`;
-    shadowHostRef.current.scrollTop = 0;
+    shadow.host.scrollTop = 0;
 
     const handleClick = (event: Event) => {
       const mouseEvent = event as MouseEvent;
@@ -203,12 +207,12 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
       );
       if (!anchor) return;
 
-      const href = anchor.getAttribute('href') || '';
-      if (!href) return;
+      const rawHref = (anchor.getAttribute('href') || '').trim();
+      if (!rawHref) return;
 
-      if (href.startsWith('#')) {
+      if (rawHref.startsWith('#')) {
         mouseEvent.preventDefault();
-        const targetId = href.slice(1);
+        const targetId = rawHref.slice(1);
         if (targetId) {
           const target = shadow.getElementById(targetId);
           target?.scrollIntoView({ behavior: 'smooth' });
@@ -216,9 +220,19 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
         return;
       }
 
-      if (/^https?:\/\//i.test(href)) {
+      if (/^(mailto:|tel:|javascript:)/i.test(rawHref)) {
         mouseEvent.preventDefault();
-        onNavigate(href);
+        return;
+      }
+
+      try {
+        const resolved = new URL(rawHref, renderedPage.url).toString();
+        if (/^https?:\/\//i.test(resolved)) {
+          mouseEvent.preventDefault();
+          onNavigate(resolved);
+        }
+      } catch {
+        // ignore unparseable URL
       }
     };
 
@@ -528,7 +542,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
           {/* Crisp Interactive Mobile Screen */}
           <div
             ref={screenRef}
-            tabIndex={0}
+            tabIndex={isVercelMode ? -1 : 0}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
@@ -540,7 +554,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
             style={{ width: displayW, height: displayH }}
             className={`relative bg-white overflow-hidden outline-none ${
               state.inspectMode ? 'cursor-crosshair' : isVercelMode ? 'cursor-default' : 'cursor-pointer'
-            } ${screenFocused ? 'ring-1 ring-sky-500/60' : ''}`}
+            } ${screenFocused && !isVercelMode ? 'ring-1 ring-sky-500/60' : ''}`}
           >
             {isVercelMode ? (
               renderedPage ? (
@@ -553,10 +567,7 @@ export const MobileDeviceStage: React.FC<MobileDeviceStageProps> = ({
                   }}
                   className="bg-white overflow-hidden select-text"
                 >
-                  <div
-                    ref={shadowHostRef}
-                    className="w-full h-full overflow-y-auto overflow-x-hidden"
-                  />
+                  <div ref={shadowHostRef} className="w-full h-full" />
                 </div>
               ) : (
                 <div className="w-full h-full flex flex-col items-center justify-center bg-slate-950 text-slate-300 px-6 text-center gap-2">

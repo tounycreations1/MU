@@ -348,6 +348,8 @@ export function useBrowserSocket() {
             cookieHeader,
             userAgent: devicePreset.userAgent,
             blockTrackers: curState.blockTrackers,
+            viewportWidth: curState.viewportWidth,
+            viewportHeight: curState.viewportHeight,
             ...getVercelProxyPayload(),
           }),
         });

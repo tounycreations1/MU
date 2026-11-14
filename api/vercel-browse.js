@@ -39,6 +39,15 @@ function escapeHtml(text) {
     .replace(/"/g, '&quot;');
 }
 
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"');
+}
+
 function normalizeUrl(raw) {
   const trimmed = raw.trim();
   if (!trimmed) return 'https://ipv4.webshare.io/';
@@ -46,7 +55,7 @@ function normalizeUrl(raw) {
   if (/^[a-z0-9-]+(\.[a-z0-9-]+)+(\/.*)?$/i.test(trimmed)) {
     return `https://${trimmed}`;
   }
-  return `https://duckduckgo.com/?q=${encodeURIComponent(trimmed)}`;
+  return `https://www.bing.com/search?q=${encodeURIComponent(trimmed)}`;
 }
 
 function makeAssetProxyUrl(absUrl, proxyId, customToken) {
@@ -58,7 +67,7 @@ function makeAssetProxyUrl(absUrl, proxyId, customToken) {
 }
 
 function resolveAbsUrl(rawRef, baseUrl) {
-  const trimmed = rawRef.trim();
+  const trimmed = decodeHtmlEntities(rawRef.trim());
   if (
     !trimmed ||
     trimmed.startsWith('data:') ||
@@ -77,8 +86,126 @@ function resolveAbsUrl(rawRef, baseUrl) {
   }
 }
 
-function rewriteCssForShadowDom(cssText, cssBaseUrl, proxyId, customToken) {
-  let out = cssText.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_m, _q, rawRef) => {
+function toPxValue(numStr, unit) {
+  const n = parseFloat(numStr);
+  if (Number.isNaN(n)) return 0;
+  const u = unit.toLowerCase();
+  if (u === 'rem' || u === 'em') return n * 16;
+  return n;
+}
+
+function shouldKeepMediaQuery(condition, viewportWidth) {
+  const cond = condition.trim().toLowerCase();
+  if (!cond) return true;
+  if (cond === 'print' || cond.startsWith('print ') || cond.includes('only print')) {
+    return false;
+  }
+  if (cond.includes('prefers-color-scheme: dark')) {
+    return false;
+  }
+  if (cond.includes('hover: hover') && !cond.includes('hover: none')) {
+    return false;
+  }
+
+  // Evaluate comma-separated media query list: keep if ANY branch matches mobile viewport
+  const branches = cond.split(',');
+  return branches.some((branch) => {
+    const b = branch.trim();
+    if (b === 'print' || b.startsWith('print ')) return false;
+    if (b.includes('prefers-color-scheme: dark')) return false;
+
+    const minMatches = Array.from(b.matchAll(/min-width\s*:\s*([0-9.]+)\s*(px|em|rem)/gi));
+    for (const m of minMatches) {
+      if (toPxValue(m[1], m[2]) > viewportWidth) return false;
+    }
+
+    const maxMatches = Array.from(b.matchAll(/max-width\s*:\s*([0-9.]+)\s*(px|em|rem)/gi));
+    for (const m of maxMatches) {
+      if (toPxValue(m[1], m[2]) < viewportWidth) return false;
+    }
+
+    // Handle CSS Media Queries Level 4 range syntax e.g. (width >= 768px) or (width <= 640px)
+    const gteMatches = Array.from(b.matchAll(/\bwidth\s*>=\s*([0-9.]+)\s*(px|em|rem)/gi));
+    for (const m of gteMatches) {
+      if (toPxValue(m[1], m[2]) > viewportWidth) return false;
+    }
+    const lteMatches = Array.from(b.matchAll(/\bwidth\s*<=\s*([0-9.]+)\s*(px|em|rem)/gi));
+    for (const m of lteMatches) {
+      if (toPxValue(m[1], m[2]) < viewportWidth) return false;
+    }
+
+    return true;
+  });
+}
+
+function filterMediaBlocks(cssText, viewportWidth) {
+  let result = '';
+  let idx = 0;
+  const len = cssText.length;
+
+  while (idx < len) {
+    const atMediaIdx = cssText.indexOf('@media', idx);
+    if (atMediaIdx === -1) {
+      result += cssText.slice(idx);
+      break;
+    }
+
+    result += cssText.slice(idx, atMediaIdx);
+    const braceStart = cssText.indexOf('{', atMediaIdx);
+    if (braceStart === -1) {
+      result += cssText.slice(atMediaIdx);
+      break;
+    }
+
+    const condition = cssText.slice(atMediaIdx + 6, braceStart).trim();
+    let depth = 1;
+    let cursor = braceStart + 1;
+    while (cursor < len && depth > 0) {
+      const ch = cssText[cursor];
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+      cursor += 1;
+    }
+
+    const innerCss = cssText.slice(braceStart + 1, Math.max(braceStart + 1, cursor - 1));
+    if (shouldKeepMediaQuery(condition, viewportWidth)) {
+      result += filterMediaBlocks(innerCss, viewportWidth);
+    }
+    idx = cursor;
+  }
+
+  return result;
+}
+
+function rewriteCssForShadowDom(
+  cssText,
+  cssBaseUrl,
+  proxyId,
+  customToken,
+  viewportWidth,
+  viewportHeight,
+  importUrlsOut,
+) {
+  // Collect @import stylesheet URLs before stripping
+  let out = cssText.replace(
+    /@import\s+(?:url\(\s*(['"]?)([^)'"]+)\1\s*\)|(['"])([^'"]+)\3)[^;]*;/gi,
+    (_m, _q1, u1, _q2, u2) => {
+      const ref = (u1 || u2 || '').trim();
+      if (ref && importUrlsOut) {
+        const abs = resolveAbsUrl(ref, cssBaseUrl);
+        if (/^https?:\/\//i.test(abs) && !importUrlsOut.includes(abs)) {
+          importUrlsOut.push(abs);
+        }
+      }
+      return '';
+    },
+  );
+
+  // Filter @media blocks strictly against mobile viewport dimensions
+  out = filterMediaBlocks(out, viewportWidth);
+
+  // Rewrite url(...) asset references
+  out = out.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_m, _q, rawRef) => {
     const trimmed = rawRef.trim();
     if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('#')) {
       return `url("${trimmed}")`;
@@ -88,10 +215,21 @@ function rewriteCssForShadowDom(cssText, cssBaseUrl, proxyId, customToken) {
     return `url("${makeAssetProxyUrl(abs, proxyId, customToken)}")`;
   });
 
-  out = out.replace(/(^|[},;]\s*):root\b/gi, '$1:host');
-  out = out.replace(/(^|[},;]\s*)html\b(?=[\s.{:#\[,>~+]|$)/gi, '$1.sv-doc');
-  out = out.replace(/(^|[},;]\s*)body\b(?=[\s.{:#\[,>~+]|$)/gi, '$1.sv-body');
-  out = out.replace(/@import\s+[^;]+;/gi, '');
+  // Convert desktop-window viewport units (vh/vw) to actual mobile container pixels
+  out = out.replace(/(-?[0-9]*\.?[0-9]+)\s*(?:d|s|l)?vh\b/gi, (_m, n) => {
+    const val = Math.round((parseFloat(n) / 100) * viewportHeight * 100) / 100;
+    return `${val}px`;
+  });
+  out = out.replace(/(-?[0-9]*\.?[0-9]+)\s*(?:d|s|l)?vw\b/gi, (_m, n) => {
+    const val = Math.round((parseFloat(n) / 100) * viewportWidth * 100) / 100;
+    return `${val}px`;
+  });
+
+  // Scope :root, html, body cleanly to Shadow DOM containers
+  out = out.replace(/(^|[},;\s]):root\b/gi, '$1:host');
+  out = out.replace(/(^|[},;\s])html\b(?=[\s.{:#\[,>~+]|$)/gi, '$1.sv-doc');
+  out = out.replace(/(^|[},;\s])body\b(?=[\s.{:#\[,>~+]|$)/gi, '$1.sv-body');
+
   return out;
 }
 
@@ -99,38 +237,70 @@ function extractTitle(html, fallbackUrl) {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   if (!match) return fallbackUrl;
   return (
-    match[1]
-      .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&#39;/g, "'")
-      .replace(/&quot;/g, '"')
+    decodeHtmlEntities(match[1].replace(/<[^>]+>/g, ''))
       .replace(/\s+/g, ' ')
       .trim() || fallbackUrl
   );
 }
 
 function extractMetaRefreshUrl(html, baseUrl) {
-  const match = html.match(
-    /<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=([^"'\s;>]+)/i,
-  );
-  if (!match?.[1]) return null;
-  const resolved = resolveAbsUrl(match[1].replace(/['"]/g, ''), baseUrl);
-  return /^https?:\/\//i.test(resolved) ? resolved : null;
+  const stripped = html.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '');
+  const metaTags = stripped.match(/<meta\b[^>]*>/gi) || [];
+  for (const tag of metaTags) {
+    if (!/http-equiv\s*=\s*["']?refresh\b/i.test(tag)) continue;
+    const contentMatch = tag.match(/\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const contentVal = contentMatch?.[1] || contentMatch?.[2] || contentMatch?.[3] || '';
+    const urlMatch = contentVal.match(/url\s*=\s*(['"]?)([^'";\s]+)/i);
+    if (urlMatch?.[2]) {
+      const resolved = resolveAbsUrl(urlMatch[2], baseUrl);
+      if (/^https?:\/\//i.test(resolved)) return resolved;
+    }
+  }
+  return null;
 }
 
-function sanitizeAndRewriteHtml(rawHtml, baseUrl, proxyId, customToken, blockTrackers) {
+function mergeClassAttr(rawAttrs, extraClass) {
+  const safeAttrs = rawAttrs.replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  if (/\bclass\s*=\s*(?:"[^"]*"|'[^']*')/i.test(safeAttrs)) {
+    return safeAttrs.replace(
+      /\bclass\s*=\s*(?:"([^"]*)"|'([^']*)')/i,
+      (_m, dq, sq) => `class="${escapeHtml(`${extraClass} ${dq ?? sq ?? ''}`.trim())}"`,
+    );
+  }
+  return ` class="${extraClass}"${safeAttrs}`;
+}
+
+function sanitizeAndRewriteHtml(
+  rawHtml,
+  baseUrl,
+  proxyId,
+  customToken,
+  blockTrackers,
+  viewportWidth,
+  viewportHeight,
+) {
   let blockedCount = 0;
   const title = extractTitle(rawHtml, baseUrl);
   const inlineStyles = [];
   const stylesheetUrls = [];
 
+  // CRITICAL: Remove <noscript> tags & contents from <head> or strip <style>/<meta> inside <noscript>
+  // so anti-JS <noscript><style>div,p{display:none}</style></noscript> NEVER hides the page
+  const cleanForHeadParsing = rawHtml.replace(
+    /<noscript\b[^>]*>([\s\S]*?)<\/noscript>/gi,
+    (_m, inner) => inner.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<meta\b[^>]*>/gi, ''),
+  );
+
+  // Extract all <link rel="stylesheet"> regardless of attribute ordering
   const linkRegex = /<link\b[^>]*>/gi;
   let linkMatch;
-  while ((linkMatch = linkRegex.exec(rawHtml)) !== null) {
+  while ((linkMatch = linkRegex.exec(cleanForHeadParsing)) !== null) {
     const tag = linkMatch[0];
-    if (!/\brel\s*=\s*["']?[^"'>]*stylesheet/i.test(tag)) continue;
+    if (!/\brel\s*=\s*(?:"[^"]*\bstylesheet\b[^"]*"|'[^']*\bstylesheet\b[^']*'|stylesheet\b)/i.test(tag)) {
+      continue;
+    }
+    if (/\bmedia\s*=\s*(?:"print"|'print'|print\b)/i.test(tag)) continue;
+
     const hrefMatch = tag.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
     const rawHref = hrefMatch?.[1] || hrefMatch?.[2] || hrefMatch?.[3] || '';
     const abs = resolveAbsUrl(rawHref, baseUrl);
@@ -144,18 +314,32 @@ function sanitizeAndRewriteHtml(rawHtml, baseUrl, proxyId, customToken, blockTra
     }
   }
 
+  // Extract inline <style> blocks (never from inside <noscript>)
   const styleRegex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
   let styleMatch;
-  while ((styleMatch = styleRegex.exec(rawHtml)) !== null) {
+  while ((styleMatch = styleRegex.exec(cleanForHeadParsing)) !== null) {
     if (styleMatch[1].trim()) {
-      inlineStyles.push(rewriteCssForShadowDom(styleMatch[1], baseUrl, proxyId, customToken));
+      inlineStyles.push(
+        rewriteCssForShadowDom(
+          styleMatch[1],
+          baseUrl,
+          proxyId,
+          customToken,
+          viewportWidth,
+          viewportHeight,
+          stylesheetUrls,
+        ),
+      );
     }
   }
 
-  const bodyMatch = rawHtml.match(/<body\b([^>]*)>([\s\S]*?)<\/body>/i);
+  const htmlMatch = cleanForHeadParsing.match(/<html\b([^>]*)>/i);
+  const htmlAttrs = htmlMatch?.[1] || '';
+  const bodyMatch = cleanForHeadParsing.match(/<body\b([^>]*)>([\s\S]*?)<\/body>/i);
   const bodyAttrs = bodyMatch?.[1] || '';
-  let content = bodyMatch ? bodyMatch[2] : rawHtml;
+  let content = bodyMatch ? bodyMatch[2] : cleanForHeadParsing;
 
+  // Strip scripts, iframes, frames, embeds, head/style/link/meta tags
   content = content
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
@@ -169,35 +353,46 @@ function sanitizeAndRewriteHtml(rawHtml, baseUrl, proxyId, customToken, blockTra
     .replace(/<meta\b[^>]*\/?>/gi, '')
     .replace(/<base\b[^>]*\/?>/gi, '');
 
-  content = content.replace(/<\/?noscript\b[^>]*>/gi, '');
+  // Strip inline JS event handlers
   content = content.replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-  content = content.replace(/\b(href|action)\s*=\s*(["'])javascript:[^"']*\2/gi, '$1="#"');
-
   content = content.replace(
-    /\b(href|action)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
-    (_m, attr, dq, sq) => {
-      const val = dq ?? sq ?? '';
+    /\b(href|action)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*'|javascript:[^\s>]+)/gi,
+    '$1="#"',
+  );
+
+  // Rewrite quoted AND unquoted href and action attributes to absolute URLs
+  content = content.replace(
+    /\b(href|action)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi,
+    (_m, attr, dq, sq, uq) => {
+      const val = dq ?? sq ?? uq ?? '';
       const abs = resolveAbsUrl(val, baseUrl);
       return `${attr}="${escapeHtml(abs)}"`;
     },
   );
 
+  // Promote lazy-loaded data-src / data-original on <img>
   content = content.replace(/<img\b([^>]*)>/gi, (fullTag, attrs) => {
-    const hasRealSrc = /\bsrc\s*=\s*(?:"(?!data:)[^"]+"|'(?!data:)[^']+')/i.test(attrs);
+    const hasRealSrc = /\bsrc\s*=\s*(?:"(?!data:)[^"]+"|'(?!data:)[^']+'|(?!data:)[^\s"'=<>`]+)/i.test(
+      attrs,
+    );
     if (hasRealSrc) return fullTag;
     const dataSrcMatch = attrs.match(
-      /\bdata-(?:src|lazy-src|original)\s*=\s*(?:"([^"]*)"|'([^']*)')/i,
+      /\bdata-(?:src|lazy-src|original)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i,
     );
-    const fallbackSrc = dataSrcMatch?.[1] || dataSrcMatch?.[2];
+    const fallbackSrc = dataSrcMatch?.[1] || dataSrcMatch?.[2] || dataSrcMatch?.[3];
     if (!fallbackSrc) return fullTag;
-    const cleaned = attrs.replace(/\bsrc\s*=\s*(?:"[^"]*"|'[^']*')/i, '');
+    const cleaned = attrs.replace(
+      /\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+)/i,
+      '',
+    );
     return `<img${cleaned} src="${escapeHtml(fallbackSrc)}">`;
   });
 
+  // Rewrite quoted AND unquoted src / poster attributes on media elements via /api/vercel-asset
   content = content.replace(
-    /\b(src|poster)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
-    (full, attr, dq, sq) => {
-      const rawVal = dq ?? sq ?? '';
+    /\b(src|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi,
+    (full, attr, dq, sq, uq) => {
+      const rawVal = dq ?? sq ?? uq ?? '';
       if (!rawVal || rawVal.startsWith('data:') || rawVal.startsWith('blob:')) {
         return full;
       }
@@ -211,6 +406,7 @@ function sanitizeAndRewriteHtml(rawHtml, baseUrl, proxyId, customToken, blockTra
     },
   );
 
+  // Rewrite srcset / data-srcset attributes (<img> and <picture><source>)
   content = content.replace(
     /\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
     (_m, dq, sq) => {
@@ -232,11 +428,12 @@ function sanitizeAndRewriteHtml(rawHtml, baseUrl, proxyId, customToken, blockTra
     },
   );
 
+  // Rewrite inline style="...url(...)..." + convert vh/vw in inline styles
   content = content.replace(
     /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
     (_m, dq, sq) => {
-      const val = dq ?? sq ?? '';
-      const rewritten = val.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_u, _q, ref) => {
+      let val = dq ?? sq ?? '';
+      val = val.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_u, _q, ref) => {
         const trimmed = ref.trim();
         if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
           return `url('${trimmed}')`;
@@ -245,12 +442,19 @@ function sanitizeAndRewriteHtml(rawHtml, baseUrl, proxyId, customToken, blockTra
         if (!/^https?:\/\//i.test(abs)) return `url('${trimmed}')`;
         return `url('${makeAssetProxyUrl(abs, proxyId, customToken)}')`;
       });
-      return `style="${escapeHtml(rewritten)}"`;
+      val = val.replace(/(-?[0-9]*\.?[0-9]+)\s*(?:d|s|l)?vh\b/gi, (_u, n) => {
+        return `${Math.round((parseFloat(n) / 100) * viewportHeight)}px`;
+      });
+      val = val.replace(/(-?[0-9]*\.?[0-9]+)\s*(?:d|s|l)?vw\b/gi, (_u, n) => {
+        return `${Math.round((parseFloat(n) / 100) * viewportWidth)}px`;
+      });
+      return `style="${escapeHtml(val)}"`;
     },
   );
 
-  const safeBodyAttrs = bodyAttrs.replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-  const wrappedHtml = `<div class="sv-doc"><div class="sv-body"${safeBodyAttrs}>${content}</div></div>`;
+  const docAttrsMerged = mergeClassAttr(htmlAttrs, 'sv-doc');
+  const bodyAttrsMerged = mergeClassAttr(bodyAttrs, 'sv-body');
+  const wrappedHtml = `<div${docAttrsMerged}><div${bodyAttrsMerged}>${content}</div></div>`;
 
   return {
     title,
@@ -274,12 +478,20 @@ export default async function handler(req, res) {
   try {
     const body = await readJsonBody(req);
     const rawUrl = typeof body.url === 'string' ? body.url : 'https://ipv4.webshare.io/';
-    const targetUrl = normalizeUrl(rawUrl);
+    let targetUrl = normalizeUrl(rawUrl);
     const method = typeof body.method === 'string' ? body.method.toUpperCase() : 'GET';
     const postPayload = typeof body.formData === 'string' ? body.formData : undefined;
     const cookieHeader = typeof body.cookieHeader === 'string' ? body.cookieHeader : '';
     const userAgent = typeof body.userAgent === 'string' ? body.userAgent : undefined;
     const blockTrackers = body.blockTrackers !== false;
+    const viewportWidth =
+      typeof body.viewportWidth === 'number' && body.viewportWidth > 200
+        ? body.viewportWidth
+        : 393;
+    const viewportHeight =
+      typeof body.viewportHeight === 'number' && body.viewportHeight > 300
+        ? body.viewportHeight
+        : 852;
     const proxyId = typeof body.proxyId === 'string' ? body.proxyId : '';
     const customProxy =
       body.proxy && typeof body.proxy === 'object' ? body.proxy : undefined;
@@ -306,7 +518,8 @@ export default async function handler(req, res) {
       timeoutMs: 11000,
     });
 
-    const ctFirst = (fetched.headers['content-type'] || '').toLowerCase();
+    // Follow meta-refresh if present
+    let ctFirst = (fetched.headers['content-type'] || '').toLowerCase();
     if (ctFirst.includes('text/html')) {
       const htmlFirst = fetched.body.toString('utf8');
       const refreshUrl = extractMetaRefreshUrl(htmlFirst, fetched.finalUrl);
@@ -317,6 +530,23 @@ export default async function handler(req, res) {
           userAgent,
           timeoutMs: 9000,
         });
+      }
+
+      // If Google Search blocks headless fetch with /httpservice/retry/enablejs, transparently fall back to Bing/DuckDuckGo HTML search for that query
+      if (
+        /google\.[a-z.]+\/search/i.test(fetched.finalUrl) &&
+        fetched.body.toString('utf8').includes('/httpservice/retry/enablejs')
+      ) {
+        const parsedGoogle = new URL(fetched.finalUrl);
+        const query = parsedGoogle.searchParams.get('q');
+        if (query) {
+          targetUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+          fetched = await proxyFetch(targetUrl, proxy, {
+            method: 'GET',
+            userAgent,
+            timeoutMs: 9000,
+          });
+        }
       }
     }
 
@@ -331,10 +561,13 @@ export default async function handler(req, res) {
         proxyId,
         customToken,
         blockTrackers,
+        viewportWidth,
+        viewportHeight,
       );
 
+      const importedUrls = [];
       const fetchedStyles = await Promise.all(
-        parsed.stylesheetUrls.slice(0, 6).map(async (cssUrl) => {
+        parsed.stylesheetUrls.slice(0, 8).map(async (cssUrl) => {
           try {
             const cssRes = await proxyFetch(cssUrl, proxy, {
               timeoutMs: 4000,
@@ -351,17 +584,57 @@ export default async function handler(req, res) {
                   cssRes.finalUrl,
                   proxyId,
                   customToken,
+                  viewportWidth,
+                  viewportHeight,
+                  importedUrls,
                 ),
               };
             }
           } catch {
-            // skip slow CSS
+            // skip unreachable CSS
           }
           return null;
         }),
       );
 
-      const externalCssList = fetchedStyles.filter((s) => s !== null);
+      // Fetch 1-level @import CSS rules if any
+      const extraImportedStyles = await Promise.all(
+        importedUrls
+          .filter((u) => !parsed.stylesheetUrls.includes(u))
+          .slice(0, 4)
+          .map(async (cssUrl) => {
+            try {
+              const cssRes = await proxyFetch(cssUrl, proxy, {
+                timeoutMs: 3500,
+                userAgent,
+                headers: { Accept: 'text/css,*/*;q=0.1' },
+              });
+              if (cssRes.status >= 200 && cssRes.status < 400) {
+                return {
+                  url: cssUrl,
+                  status: cssRes.status,
+                  sizeBytes: cssRes.body.length,
+                  css: rewriteCssForShadowDom(
+                    cssRes.body.toString('utf8'),
+                    cssRes.finalUrl,
+                    proxyId,
+                    customToken,
+                    viewportWidth,
+                    viewportHeight,
+                    null,
+                  ),
+                };
+              }
+            } catch {
+              // ignore
+            }
+            return null;
+          }),
+      );
+
+      const externalCssList = [...fetchedStyles, ...extraImportedStyles].filter(
+        (s) => s !== null,
+      );
 
       sendJson(res, 200, {
         ok: true,
