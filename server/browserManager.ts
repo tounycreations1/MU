@@ -220,6 +220,12 @@ export class BrowserManager {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-component-update',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--no-first-run',
       ],
     };
     if (executablePath) {
@@ -491,7 +497,7 @@ export class BrowserManager {
     const vp = this.getEffectiveViewport();
     await this.cdp.send('Page.startScreencast', {
       format: 'jpeg',
-      quality: 76,
+      quality: 65,
       maxWidth: Math.min(Math.round(vp.width * 1.5), 1100),
       maxHeight: Math.min(Math.round(vp.height * 1.5), 1650),
       everyNthFrame: 1,
@@ -639,7 +645,7 @@ export class BrowserManager {
       if (myToken !== this.navToken) return;
       this.currentUrl = this.page.url();
       this.currentTitle = (await this.page.title().catch(() => '')) || this.currentUrl;
-      await this.page.waitForTimeout(300);
+      await this.page.waitForTimeout(100);
     } catch (err) {
       if (myToken !== this.navToken) return;
       const msg = err instanceof Error ? err.message : String(err);
